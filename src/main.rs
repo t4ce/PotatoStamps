@@ -1,17 +1,23 @@
 //! Potato Stamps: an immutable Picasso scene document rendered through the
-//! TRUEOS immediate primitive path.
+//! TRUEOS Picasso retained rendering path.
 //!
 //! The application intentionally has no Blueprint registration.  It becomes
 //! runnable only when a future Blueprint explicitly packages it.
 #![no_std]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
 use core::fmt;
-use potato_stamps::scene::{self, DOCUMENT_BYTES, DOCUMENT_NAME, Scene, StampMode, VERTEX_COUNT};
+use potato_stamps::scene::{
+    self, COLOR_TEXTURE_BYTES, COLOR_TEXTURE_NAME, DOCUMENT_BYTES, DOCUMENT_NAME, INDEX_COUNT,
+    Scene, VERTEX_COUNT,
+};
 use trueos::ui4_scene::{Damage, Error as Ui4Error, Frame};
 use trueos::vgpu::{
     BUFFER_USAGE_INDEX, BUFFER_USAGE_MAP_WRITE, BUFFER_USAGE_VERTEX, Buffer, Capabilities, Device,
-    IndexedBatchDrawV2, IndexedDrawBatchV2, Queue, QueueClass, RenderPipeline,
-    SHADER_PACKAGE_CLIP_POSITION3_IMMEDIATE_RGBA_FNV1A64, ShaderModule,
+    Queue, QueueClass, RetainedFrameSubmit, RetainedMesh, RetainedMeshDescriptor,
+    RetainedTransformSeed,
 };
 use trueos::{
     clock,
@@ -34,19 +40,17 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     trueos::panic_abort("Potato Stamps panic\n")
 }
 
-/// The authority signal affects the selection descriptor only. Both GPU
-/// buffers stay immutable after `open` has uploaded the Picasso-decoded scene.
+/// Picasso-decoded geometry and palette remain immutable after `open` hands
+/// them to the retained carrier.
 struct PotatoStamps {
     _picasso: Picasso,
     frame: Frame,
     device: Device,
     queue: Queue,
-    _shader: ShaderModule,
-    pipeline: RenderPipeline,
     vertex_buffer: Buffer,
     index_buffer: Buffer,
-    mode: StampMode,
-    previous_keys: u8,
+    retained_mesh: RetainedMesh,
+    palette: trueos::vmedia::RetainedTexture,
     timeline: u64,
 }
 
@@ -56,10 +60,17 @@ impl PotatoStamps {
         picasso
             .put_embedded_asset(DOCUMENT_NAME, DOCUMENT_BYTES)
             .map_err(DemoError::Picasso)?;
+        picasso
+            .put_embedded_asset(COLOR_TEXTURE_NAME, COLOR_TEXTURE_BYTES)
+            .map_err(DemoError::Picasso)?;
         let stored = picasso
             .embedded_asset(DOCUMENT_NAME)
             .map_err(DemoError::Picasso)?
             .ok_or(DemoError::MissingAsset)?;
+        let stored_palette = picasso
+            .embedded_asset(COLOR_TEXTURE_NAME)
+            .map_err(DemoError::Picasso)?
+            .ok_or(DemoError::MissingPalette)?;
         let scene = Scene::decode(&stored).map_err(DemoError::Scene)?;
 
         let frame = Frame::open_streaming(96, 72, WIDTH, HEIGHT)
@@ -69,38 +80,54 @@ impl PotatoStamps {
         let queue = device
             .create_queue(QueueClass::Render)
             .map_err(|code| DemoError::Vgpu("queue-create", code))?;
-        let shader = device
-            .create_shader_module(SHADER_PACKAGE_CLIP_POSITION3_IMMEDIATE_RGBA_FNV1A64)
-            .map_err(|code| DemoError::Vgpu("shader-create", code))?;
-        let pipeline = device
-            .create_render_pipeline(shader, core::mem::size_of::<scene::Position>() as u32, 0)
-            .map_err(|code| DemoError::Vgpu("pipeline-create", code))?;
+        let retained_vertices = retained_vertex_bytes(&scene);
+        let retained_indices = retained_index_bytes(&scene);
         let vertex_buffer = device
             .create_buffer(
-                scene.position_bytes().len(),
+                retained_vertices.len(),
                 BUFFER_USAGE_MAP_WRITE | BUFFER_USAGE_VERTEX,
             )
             .map_err(|code| DemoError::Vgpu("vertex-buffer-create", code))?;
         let index_buffer = device
             .create_buffer(
-                scene.index_bytes().len(),
+                retained_indices.len(),
                 BUFFER_USAGE_MAP_WRITE | BUFFER_USAGE_INDEX,
             )
             .map_err(|code| DemoError::Vgpu("index-buffer-create", code))?;
 
-        write_exact(device, vertex_buffer, scene.position_bytes())
+        write_exact(device, vertex_buffer, &retained_vertices)
             .map_err(|code| DemoError::Vgpu("vertex-upload", code))?;
-        write_exact(device, index_buffer, scene.index_bytes())
+        write_exact(device, index_buffer, &retained_indices)
             .map_err(|code| DemoError::Vgpu("index-upload", code))?;
+        let retained_mesh = device
+            .create_retained_mesh(
+                vertex_buffer,
+                index_buffer,
+                RetainedMeshDescriptor {
+                    vertex_count: VERTEX_COUNT as u32,
+                    index_count: INDEX_COUNT as u32,
+                    vertex_layout: trueos::vgpu::RETAINED_VERTEX_LAYOUT_POS_NORMAL_UV,
+                    ..RetainedMeshDescriptor::default()
+                },
+            )
+            .map_err(|code| DemoError::Vgpu("retained-mesh-create", code))?;
+        let palette = trueos::async_fs::block_on(trueos::vmedia::decode_retained_asset(
+            device,
+            COLOR_TEXTURE_NAME,
+            &stored_palette,
+        ))
+        .map_err(|code| DemoError::Vgpu("palette-decode", code))?;
 
         logl::log(
             level::INFO,
             format_args!(
-                "PotatoStamps: Picasso readback accepted document={} source_bytes={} vertices={} immutable_index_words={}",
+                "PotatoStamps: Picasso readback accepted document={} document_bytes={} palette={} palette_bytes={} vertices={} opaque_triangles={}",
                 DOCUMENT_NAME,
                 stored.len(),
+                COLOR_TEXTURE_NAME,
+                stored_palette.len(),
                 VERTEX_COUNT,
-                scene.indices.len(),
+                INDEX_COUNT / 3,
             ),
         );
         Ok(Self {
@@ -108,18 +135,15 @@ impl PotatoStamps {
             frame,
             device,
             queue,
-            _shader: shader,
-            pipeline,
             vertex_buffer,
             index_buffer,
-            mode: StampMode::Triangle,
-            previous_keys: 0,
+            retained_mesh,
+            palette,
             timeline: 0,
         })
     }
 
     fn render_frame(&mut self) -> Result<(), DemoError> {
-        self.service_authority_signal()?;
         let width = self.frame.width();
         let height = self.frame.height();
         self.frame
@@ -131,15 +155,21 @@ impl PotatoStamps {
             .map_err(|code| DemoError::Vgpu("surface-acquire", code))?;
         let point = self
             .device
-            .submit_ui4_indexed_batch_v2(
+            .submit_retained_frame(
                 self.queue,
                 surface,
-                self.pipeline,
+                self.retained_mesh,
                 self.vertex_buffer,
                 self.index_buffer,
-                self.batch_for_authorized_mode(),
+                RetainedFrameSubmit {
+                    clear_rgba8_srgb: u32::from_le_bytes([21, 25, 32, 255]),
+                    base_color_texture: self.palette.id().raw(),
+                    seed_count: 1,
+                    seeds: identity_retained_seeds(),
+                    ..RetainedFrameSubmit::default()
+                },
             )
-            .map_err(|code| DemoError::Vgpu("indexed-batch-submit", code))?;
+            .map_err(|code| DemoError::Vgpu("retained-frame-submit", code))?;
         self.device
             .wait(self.queue, point.value)
             .map_err(|code| DemoError::Vgpu("timeline-wait", code))?;
@@ -149,72 +179,47 @@ impl PotatoStamps {
         self.timeline = point.value;
         Ok(())
     }
+}
 
-    /// 1/2/3 are CPU-originating authorization signals. They choose an
-    /// already-seeded index range and topology; no GPU buffer is rewritten.
-    fn service_authority_signal(&mut self) -> Result<(), DemoError> {
-        let state = self
-            .frame
-            .keyboard_state()
-            .map_err(|error| DemoError::Ui4("authority-keyboard", error))?;
-        let keys = state.map_or(0, |keyboard| {
-            [0x02u8, 0x03, 0x04]
-                .into_iter()
-                .enumerate()
-                .fold(0u8, |bits, (slot, key)| {
-                    bits | ((keyboard.is_down(key) as u8) << slot)
-                })
-        });
-        let pressed = keys & !self.previous_keys;
-        self.previous_keys = keys;
-        if pressed == 0 {
-            return Ok(());
-        }
-        let key = if pressed & 1 != 0 {
-            0x02
-        } else if pressed & 2 != 0 {
-            0x03
-        } else {
-            0x04
-        };
-        if let Some(mode) = StampMode::from_authority_key(key) {
-            self.mode = mode;
-            let selection = mode.selection();
-            logl::log(
-                level::INFO,
-                format_args!(
-                    "PotatoStamps: authority mode={} topology={} first_index={} index_count={} vertex_uploads=1 index_uploads=1",
-                    mode.label(),
-                    selection.topology,
-                    selection.first_index,
-                    selection.index_count,
-                ),
-            );
-        }
-        Ok(())
+fn retained_vertex_bytes(scene: &Scene) -> Vec<u8> {
+    let mut retained = Vec::with_capacity(VERTEX_COUNT * 24);
+    for position in &scene.positions {
+        retained.extend_from_slice(&position.x.to_le_bytes());
+        retained.extend_from_slice(&position.y.to_le_bytes());
+        retained.extend_from_slice(&position.z.to_le_bytes());
+        // The current retained textured carrier forwards normal.xy into its
+        // sampler proof. The authored document makes this palette selector
+        // explicit; each triangle uses one constant texel coordinate.
+        retained.extend_from_slice(&position.texture_u.to_le_bytes());
+        retained.extend_from_slice(&position.texture_v.to_le_bytes());
+        retained.extend_from_slice(&1.0f32.to_le_bytes());
+        retained.extend_from_slice(&0.0f32.to_le_bytes());
+        retained.extend_from_slice(&0.0f32.to_le_bytes());
     }
+    retained
+}
 
-    fn batch_for_authorized_mode(&self) -> IndexedDrawBatchV2 {
-        let selection = self.mode.selection();
-        IndexedDrawBatchV2 {
-            clear_rgba8_srgb: u32::from_le_bytes([21, 25, 32, 255]),
-            draw_count: 4,
-            draws: core::array::from_fn(|tile| IndexedBatchDrawV2 {
-                index_count: selection.index_count,
-                first_index: selection.first_index,
-                base_vertex: (tile * 3) as i32,
-                rgba8_srgb: [
-                    u32::from_le_bytes([238, 174, 65, 255]),
-                    u32::from_le_bytes([245, 199, 91, 255]),
-                    u32::from_le_bytes([219, 139, 46, 255]),
-                    u32::from_le_bytes([255, 211, 111, 255]),
-                ][tile],
-                topology: selection.topology,
-                reserved: 0,
-            }),
-            ..IndexedDrawBatchV2::default()
-        }
+fn retained_index_bytes(scene: &Scene) -> Vec<u8> {
+    let mut retained = Vec::with_capacity(INDEX_COUNT * core::mem::size_of::<u32>());
+    for index in scene.indices {
+        retained.extend_from_slice(&index.to_le_bytes());
     }
+    retained
+}
+
+fn identity_retained_seeds() -> [RetainedTransformSeed; trueos::vgpu::MAX_RETAINED_TRANSFORM_SEEDS]
+{
+    let mut seeds = [RetainedTransformSeed::default(); trueos::vgpu::MAX_RETAINED_TRANSFORM_SEEDS];
+    seeds[0] = RetainedTransformSeed {
+        translation: [0.0, 0.0, 0.0],
+        scale: [1.0, 1.0, 1.0],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        local_radius: 2.0,
+        previous_translation: [0.0, 0.0, 0.0],
+        draw_group: 0,
+        flags: 0,
+    };
+    seeds
 }
 
 fn write_exact(device: Device, buffer: Buffer, bytes: &[u8]) -> Result<(), i32> {
@@ -227,6 +232,7 @@ fn write_exact(device: Device, buffer: Buffer, bytes: &[u8]) -> Result<(), i32> 
 #[derive(Debug)]
 enum DemoError {
     MissingAsset,
+    MissingPalette,
     Picasso(trueos_picasso::PicassoError),
     Scene(scene::SceneError),
     Ui4(&'static str, Ui4Error),
@@ -237,6 +243,7 @@ impl fmt::Display for DemoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingAsset => f.write_str("Picasso did not return the seeded document"),
+            Self::MissingPalette => f.write_str("Picasso did not return the seeded palette"),
             Self::Picasso(error) => write!(f, "Picasso storage error: {error}"),
             Self::Scene(error) => write!(f, "scene document error: {error}"),
             Self::Ui4(stage, error) => write!(f, "UI4 {stage} failed: {error:?}"),
@@ -265,6 +272,13 @@ fn main() {
 fn run() -> Result<(), DemoError> {
     let mut demo = PotatoStamps::open()?;
     demo.render_frame()?;
+    logl::log(
+        level::INFO,
+        format_args!(
+            "PotatoStamps: retained triangle frame submitted and retired timeline={}",
+            demo.timeline
+        ),
+    );
     let start = clock::monotonic_millis();
     loop {
         vsys::poll_once();
