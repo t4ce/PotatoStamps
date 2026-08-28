@@ -1,8 +1,8 @@
 # Potato Stamps
 
-`Potato Stamps` is a deliberately small, standalone Picasso/TRUEOS example.
-It is package-ready (including its native TRUEOS target configuration) but has
-no Blueprint registration or autostart entry.
+`Potato Stamps` is a deliberately small Picasso/TRUEOS Blueprint demo. It is
+registered in `TRUEOS-Blueprints/apps.json`; the checked-in TRUEOS
+`startup.json` launches `potato-stamps.bp` in the `pot` slot.
 
 ## Asset path
 
@@ -20,38 +20,40 @@ There is no build-time prepared render buffer and no second asset path.
 
 ## Primitive experiment
 
-The document holds four tiled copies of the same intentionally CCW three-point
-stamp.  Its immutable index catalogue has three interpretations of those same
-three positions:
+The document holds four colored copies of the same intentionally CCW
+three-point stamp. After Picasso readback, initialization builds and uploads
+one immutable index catalogue containing every primitive assembly mode exposed
+by the TRUEOS V2 batch ABI:
 
 | Mode | Topology | Index sequence |
 | --- | --- | --- |
-| Triangle | triangle list | `0, 1, 2` |
-| Two lines | line list | `0, 1, 1, 2` |
-| Closed loop | line list | `0, 1, 1, 2, 2, 0` |
+| `1` | point list | `0, 1, 2` |
+| `2` | line list (closed) | `0, 1, 1, 2, 2, 0` |
+| `3` | line strip (closed) | `0, 1, 2, 0` |
+| `4` | triangle list | `0, 1, 2` |
+| `5` | triangle strip | `0, 1, 2` |
+| `6` | triangle fan | `0, 1, 2` |
 
-The vertex and index buffers are written once, during initialization. Press
-`1`, `2`, or `3` to change the CPU authority signal; the frame submission then
-selects a pre-seeded range/topology without rebuilding or re-uploading either
-execution buffer.
+The vertex and index execution buffers are written once during initialization.
+Press `1` through `6` to select topology; each frame changes only the four draw
+descriptors. Triangle list (`4`) is the startup default. Colors are decoded
+from the opaque BMP returned by Picasso and carried as immediate per-draw RGBA,
+so the demo no longer depends on the retained sampled-material probe. This
+immediate pipeline preserves draw order without an implicit depth surface and
+retries transient UI4 or Render0 contention.
 
 ## Current engine boundary
 
-The TRUEOS vGPU C-ABI currently accepts only point-list, line-list and
-triangle-list for `IndexedDrawBatchV2`. It has no line-loop topology value and
-no persistent GPU-side command/selector buffer. The closed loop is therefore
-represented truthfully as a three-segment line list, and the CPU-authority
-signal still chooses the per-frame `IndexedDrawBatchV2` descriptor. A future
-GPU-side selector can consume the same immutable document/buffers without
-changing this asset format.
+The TRUEOS vGPU C-ABI and resident command encoder accept point list, line
+list/strip, and triangle list/strip/fan for `IndexedDrawBatchV2`. Intel has no
+line-loop assembly value, so closed loops explicitly repeat the first index in
+a line strip or use three independent line-list segments.
 
-The checked-in vGPU broker also canonicalizes immediate triangle indices to
-CCW before resident submission. The authored triangle is already CCW, so the
-normalization is a no-op and the intended winding is explicit in the source
-document.
+The kernel bounds-checks the Picasso-derived vertex/index buffers and each
+draw range, maps the chosen topology to the Intel VF value, encodes the batch,
+and submits that command stream through the Picasso GuC carrier. GuC schedules
+the already-encoded 3D batch; it does not reinterpret topology itself.
 
-This was verified against the checked-in authority, not assumed from driver
-convention: `../TRUEOS/src/r/io/vgpu_cabi.rs` maps only point/line/triangle
-lists at `broker_primitive_topology`, while `../TRUEOS/src/gpu/vgpu.rs`
-rejects incompatible index counts and swaps clockwise immediate triangles to
-CCW before resident submission.
+Triangle-list indices are canonicalized to CCW before resident submission;
+strip and fan order is preserved because their native assembly semantics
+depend on index order.

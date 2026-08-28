@@ -5,6 +5,7 @@
 //! afterwards.
 
 use core::fmt;
+use trueos::vgpu::{IndexedBatchDrawV2, IndexedDrawBatchV2};
 
 pub const DOCUMENT_NAME: &str = "potato-stamps.pscene";
 pub const DOCUMENT_BYTES: &[u8] = include_bytes!("../Assets/potato-stamps.pscene");
@@ -13,9 +14,11 @@ pub const STAMP_COUNT: usize = 4;
 pub const VERTICES_PER_STAMP: usize = 3;
 pub const VERTEX_COUNT: usize = STAMP_COUNT * VERTICES_PER_STAMP;
 pub const INDEX_COUNT: usize = VERTEX_COUNT;
+pub const PRIMITIVE_MODE_COUNT: usize = 6;
+pub const EXECUTION_INDEX_COUNT: usize = STAMP_COUNT * (3 + 6 + 4 + 3 + 3 + 3);
 
 /// A four-texel opaque BMP: red, green, blue, and yellow. The bytes seed
-/// Picasso, then must be read back from Picasso before media decoding.
+/// Picasso, then must be read back from Picasso before palette decoding.
 pub const COLOR_TEXTURE_BYTES: &[u8] = &[
     b'B', b'M', 70, 0, 0, 0, 0, 0, 0, 0, 54, 0, 0, 0, // BMP file header
     40, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 1, 0, 32, 0, // DIB core
@@ -33,8 +36,8 @@ pub struct Position {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    /// The retained textured carrier currently samples its interpolated
-    /// normal XY. These authored values select one solid texel per triangle.
+    /// Legacy authored palette selector retained in the re-exportable scene.
+    /// The direct execution vertex buffer intentionally uploads only XYZ.
     pub texture_u: f32,
     pub texture_v: f32,
 }
@@ -43,6 +46,104 @@ pub struct Position {
 pub struct Scene {
     pub positions: [Position; VERTEX_COUNT],
     pub indices: [u32; INDEX_COUNT],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimitiveMode {
+    PointList,
+    LineList,
+    LineStrip,
+    TriangleList,
+    TriangleStrip,
+    TriangleFan,
+}
+
+impl PrimitiveMode {
+    pub const ALL: [Self; PRIMITIVE_MODE_COUNT] = [
+        Self::PointList,
+        Self::LineList,
+        Self::LineStrip,
+        Self::TriangleList,
+        Self::TriangleStrip,
+        Self::TriangleFan,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::PointList => "point-list",
+            Self::LineList => "line-list-closed",
+            Self::LineStrip => "line-strip-closed",
+            Self::TriangleList => "triangle-list",
+            Self::TriangleStrip => "triangle-strip",
+            Self::TriangleFan => "triangle-fan",
+        }
+    }
+
+    pub const fn indices_per_stamp(self) -> usize {
+        match self {
+            Self::PointList | Self::TriangleList | Self::TriangleStrip | Self::TriangleFan => 3,
+            Self::LineList => 6,
+            Self::LineStrip => 4,
+        }
+    }
+
+    pub const fn slot(self) -> usize {
+        match self {
+            Self::PointList => 0,
+            Self::LineList => 1,
+            Self::LineStrip => 2,
+            Self::TriangleList => 3,
+            Self::TriangleStrip => 4,
+            Self::TriangleFan => 5,
+        }
+    }
+
+    pub const fn vgpu_topology(self) -> u32 {
+        match self {
+            Self::PointList => trueos::vgpu::PRIMITIVE_TOPOLOGY_POINT_LIST,
+            Self::LineList => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_LIST,
+            Self::LineStrip => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_STRIP,
+            Self::TriangleList => trueos::vgpu::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            Self::TriangleStrip => trueos::vgpu::PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+            Self::TriangleFan => trueos::vgpu::PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExecutionIndexCatalogue {
+    pub indices: [u32; EXECUTION_INDEX_COUNT],
+    pub first_indices: [u32; PRIMITIVE_MODE_COUNT],
+}
+
+impl ExecutionIndexCatalogue {
+    /// Lower one catalogue interpretation to the exact V2 descriptors consumed
+    /// by the kernel. The uploaded vertex and index buffers remain unchanged.
+    pub fn draw_batch(
+        &self,
+        mode: PrimitiveMode,
+        colors: [u32; STAMP_COUNT],
+        clear_rgba8_srgb: u32,
+    ) -> IndexedDrawBatchV2 {
+        let mode_slot = mode.slot();
+        let index_count = mode.indices_per_stamp() as u32;
+        let mut batch = IndexedDrawBatchV2 {
+            clear_rgba8_srgb,
+            draw_count: STAMP_COUNT as u32,
+            ..IndexedDrawBatchV2::default()
+        };
+        for (stamp, color) in colors.into_iter().enumerate() {
+            batch.draws[stamp] = IndexedBatchDrawV2 {
+                index_count,
+                first_index: self.first_indices[mode_slot] + stamp as u32 * index_count,
+                base_vertex: 0,
+                rgba8_srgb: color,
+                topology: mode.vgpu_topology(),
+                reserved: 0,
+            };
+        }
+        batch
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +219,58 @@ impl Scene {
         }
         Ok(Self { positions, indices })
     }
+
+    /// Build every native primitive interpretation once from the immutable
+    /// triangle corners read back from Picasso. Frame submission only selects
+    /// ranges from this catalogue; it never rewrites execution-buffer bytes.
+    pub fn execution_index_catalogue(&self) -> ExecutionIndexCatalogue {
+        let mut indices = [0; EXECUTION_INDEX_COUNT];
+        let mut first_indices = [0; PRIMITIVE_MODE_COUNT];
+        let mut cursor = 0usize;
+        for (mode_slot, mode) in PrimitiveMode::ALL.into_iter().enumerate() {
+            first_indices[mode_slot] = cursor as u32;
+            for stamp in 0..STAMP_COUNT {
+                let start = stamp * VERTICES_PER_STAMP;
+                let [a, b, c] = self.indices[start..start + VERTICES_PER_STAMP] else {
+                    unreachable!()
+                };
+                let sequence: &[u32] = match mode {
+                    PrimitiveMode::PointList
+                    | PrimitiveMode::TriangleList
+                    | PrimitiveMode::TriangleStrip
+                    | PrimitiveMode::TriangleFan => &[a, b, c],
+                    PrimitiveMode::LineList => &[a, b, b, c, c, a],
+                    PrimitiveMode::LineStrip => &[a, b, c, a],
+                };
+                indices[cursor..cursor + sequence.len()].copy_from_slice(sequence);
+                cursor += sequence.len();
+            }
+        }
+        debug_assert_eq!(cursor, EXECUTION_INDEX_COUNT);
+        ExecutionIndexCatalogue {
+            indices,
+            first_indices,
+        }
+    }
+}
+
+pub fn decode_palette_rgba(bytes: &[u8]) -> Option<[u32; STAMP_COUNT]> {
+    if bytes.len() != COLOR_TEXTURE_BYTES.len()
+        || bytes.get(..2) != Some(b"BM")
+        || bytes.get(18..26) != Some(&[4, 0, 0, 0, 1, 0, 0, 0])
+    {
+        return None;
+    }
+    let pixels = bytes.get(54..70)?;
+    Some(core::array::from_fn(|slot| {
+        let offset = slot * 4;
+        u32::from_le_bytes([
+            pixels[offset + 2],
+            pixels[offset + 1],
+            pixels[offset],
+            pixels[offset + 3],
+        ])
+    }))
 }
 
 fn all_triangles_are_ccw(
@@ -205,5 +358,70 @@ mod tests {
                 0, 0, 255, 255, 0, 255, 0, 255, 255, 0, 0, 255, 0, 255, 255, 255
             ]
         );
+        assert_eq!(
+            decode_palette_rgba(COLOR_TEXTURE_BYTES).unwrap(),
+            [
+                u32::from_le_bytes([255, 0, 0, 255]),
+                u32::from_le_bytes([0, 255, 0, 255]),
+                u32::from_le_bytes([0, 0, 255, 255]),
+                u32::from_le_bytes([255, 255, 0, 255]),
+            ]
+        );
+    }
+
+    #[test]
+    fn execution_catalogue_contains_all_six_native_topologies() {
+        let scene = Scene::decode(DOCUMENT_BYTES).unwrap();
+        let catalogue = scene.execution_index_catalogue();
+        assert_eq!(catalogue.indices.len(), EXECUTION_INDEX_COUNT);
+        for (slot, mode) in PrimitiveMode::ALL.into_iter().enumerate() {
+            let first = catalogue.first_indices[slot] as usize;
+            let count = mode.indices_per_stamp();
+            let expected: &[u32] = match mode {
+                PrimitiveMode::PointList
+                | PrimitiveMode::TriangleList
+                | PrimitiveMode::TriangleStrip
+                | PrimitiveMode::TriangleFan => &[0, 1, 2],
+                PrimitiveMode::LineList => &[0, 1, 1, 2, 2, 0],
+                PrimitiveMode::LineStrip => &[0, 1, 2, 0],
+            };
+            assert_eq!(&catalogue.indices[first..first + count], expected,);
+        }
+        assert!(
+            catalogue
+                .indices
+                .into_iter()
+                .all(|index| index < VERTEX_COUNT as u32)
+        );
+    }
+
+    #[test]
+    fn every_mode_lowers_to_exact_v2_draw_descriptors() {
+        let scene = Scene::decode(DOCUMENT_BYTES).unwrap();
+        let catalogue = scene.execution_index_catalogue();
+        let colors = [0x11, 0x22, 0x33, 0x44];
+
+        for mode in PrimitiveMode::ALL {
+            let batch = catalogue.draw_batch(mode, colors, 0xaabb_ccdd);
+            assert_eq!(batch.clear_rgba8_srgb, 0xaabb_ccdd);
+            assert_eq!(batch.draw_count, STAMP_COUNT as u32);
+            for (stamp, draw) in batch.draws[..STAMP_COUNT].iter().enumerate() {
+                assert_eq!(draw.topology, mode.vgpu_topology());
+                assert_eq!(draw.index_count, mode.indices_per_stamp() as u32);
+                assert_eq!(
+                    draw.first_index,
+                    catalogue.first_indices[mode.slot()]
+                        + stamp as u32 * mode.indices_per_stamp() as u32
+                );
+                assert_eq!(draw.base_vertex, 0);
+                assert_eq!(draw.rgba8_srgb, colors[stamp]);
+                assert_eq!(draw.reserved, 0);
+            }
+            for draw in &batch.draws[STAMP_COUNT..] {
+                assert_eq!(draw.index_count, 0);
+                assert_eq!(draw.topology, 0);
+                assert_eq!(draw.reserved, 0);
+            }
+        }
     }
 }
