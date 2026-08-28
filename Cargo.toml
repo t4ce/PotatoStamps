@@ -1,0 +1,35 @@
+[package]
+name = "potato-stamps"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Picasso runtime-asset demo: stable potato-stamp vertices with selectable primitive interpretation"
+
+# Blueprint packaging metadata; the app is registered in
+# TRUEOS-Blueprints/apps.json for normal packing and startup selection.
+[package.metadata.trueos-blueprint]
+replicatable = true
+
+[[bin]]
+name = "potato-stamps"
+path = "src/main.rs"
+test = false
+bench = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+trueos = { path = "../TRUEOS-Blueprints/api" }
+trueos-picasso = { path = "../TRUEOS-Picasso", default-features = false, features = ["blueprint"] }
+
+[dev-dependencies]
+# redb's in-memory Blueprint backend is `no_std` in production.  Its host
+# tests need the upstream std shim because Cargo's test profile unwinds.
+trueos-picasso = { path = "../TRUEOS-Picasso", default-features = false, features = ["blueprint", "test-std"] }
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

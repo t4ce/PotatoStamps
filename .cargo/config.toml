@@ -1,0 +1,4 @@
+[env]
+# Pack-ready standalone Blueprint target. Registration/autostart deliberately
+# remains outside this repository until the demo is promoted.
+TRUEOS_BLUEPRINT_TARGET_SPEC = { value = "../TRUEOS-Blueprints/apps/target.json", relative = true }
