@@ -10,7 +10,7 @@ use potato_stamps::scene::{
     self, COLOR_TEXTURE_BYTES, COLOR_TEXTURE_NAME, DOCUMENT_BYTES, DOCUMENT_NAME,
     EXECUTION_INDEX_COUNT, EXECUTION_VERTEX_COUNT, ExecutionIndexCatalogue, LINE_GRID_NAME,
     LINE_GRID_VERTEX_COUNT, LINE_GRID_XYZ_BYTES, PrimitiveMode, STAMP_COUNT, Scene, VERTEX_COUNT,
-    decode_palette_rgba, line_grid_positions,
+    decode_palette_rgba, line_grid_positions, quad_grid_positions, rect_list_positions,
 };
 use trueos::ui4_scene::{Damage, Error as Ui4Error, Frame, ResizeEvent};
 use trueos::vgpu::{
@@ -32,6 +32,11 @@ const HEIGHT: u32 = 360;
 // black at two-thirds (66.7%) alpha so the application plane beneath remains
 // visible; the RGB grid triangles themselves remain fully opaque.
 const CLEAR_RGBA8_SRGB: u32 = u32::from_le_bytes([0, 0, 0, 170]);
+const FRAME_OPACITY_OPAQUE: u8 = u8::MAX;
+const FRAME_OPACITY_SEVENTY_PERCENT: u8 = 179;
+const HID_USAGE_EQUALS_PLUS: u8 = 0x2e;
+const HID_USAGE_KEYPAD_PLUS: u8 = 0x57;
+const HID_MODIFIER_SHIFT_MASK: u8 = 0x22;
 
 // Keep the registered package directly `cargo check`-able as a thin no_std
 // Blueprint. TRUEOS's packer detects these declarations for the startup image.
@@ -43,9 +48,8 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     trueos::panic_abort("Potato Stamps panic\n")
 }
 
-/// Picasso-decoded geometry, the shared 1,000-vertex seed plane, topology
-/// catalogue, and colors are immutable after `open` uploads the two execution
-/// buffers.
+/// Picasso-decoded geometry, native primitive seeds, topology catalogue, and
+/// colors are immutable after `open` uploads the two execution buffers.
 struct PotatoStamps {
     _picasso: Picasso,
     frame: Frame,
@@ -57,8 +61,10 @@ struct PotatoStamps {
     index_buffer: Buffer,
     catalogue: ExecutionIndexCatalogue,
     colors: [u32; STAMP_COUNT],
-    selected_mode: usize,
-    number_keys: u8,
+    selected_mode: PrimitiveMode,
+    number_keys: u16,
+    opacity_toggle_key: bool,
+    frame_is_seventy_percent: bool,
     pending_resize: Option<ResizeEvent>,
     timeline: u64,
 }
@@ -156,8 +162,10 @@ impl PotatoStamps {
             index_buffer,
             catalogue,
             colors,
-            selected_mode: 3,
+            selected_mode: PrimitiveMode::TriangleList,
             number_keys: 0,
+            opacity_toggle_key: false,
+            frame_is_seventy_percent: false,
             pending_resize: None,
             timeline: 0,
         })
@@ -183,11 +191,8 @@ impl PotatoStamps {
                 self.pipeline,
                 self.vertex_buffer,
                 self.index_buffer,
-                self.catalogue.draw_batch(
-                    PrimitiveMode::ALL[self.selected_mode],
-                    self.colors,
-                    CLEAR_RGBA8_SRGB,
-                ),
+                self.catalogue
+                    .draw_batch(self.selected_mode, self.colors, CLEAR_RGBA8_SRGB),
             )
             .map_err(|code| DemoError::Vgpu("indexed-batch-v2-submit", code))?;
         self.device
@@ -244,25 +249,58 @@ impl PotatoStamps {
             .frame
             .keyboard_state()
             .map_err(|error| DemoError::Ui4("mode-hotkeys", error))?;
-        let current = state.map_or(0, |keyboard| {
-            let mut bits = 0u8;
-            for (slot, mode) in PrimitiveMode::ALL.into_iter().enumerate() {
-                if keyboard.is_down(mode.number_key_hid_usage()) {
-                    bits |= 1 << slot;
+        let (current, opacity_toggle_down) = state.map_or((0, false), |keyboard| {
+            let mut bits = 0u16;
+            for key in 0..=9u8 {
+                let usage = if key == 0 { 0x27 } else { 0x1d + key };
+                if keyboard.is_down(usage) {
+                    bits |= 1 << key;
                 }
             }
-            bits
+            let top_row_plus = keyboard.is_down(HID_USAGE_EQUALS_PLUS)
+                && keyboard.modifiers & HID_MODIFIER_SHIFT_MASK != 0;
+            (
+                bits,
+                top_row_plus || keyboard.is_down(HID_USAGE_KEYPAD_PLUS),
+            )
         });
         let pressed = current & !self.number_keys;
         self.number_keys = current;
         if pressed != 0 {
-            self.selected_mode = pressed.trailing_zeros() as usize;
+            let key = pressed.trailing_zeros() as u8;
+            if let Some(next) = self.selected_mode.on_number_key_pressed(key) {
+                self.selected_mode = next;
+                logl::log(
+                    level::INFO,
+                    format_args!(
+                        "PotatoStamps: native primitive selected key={} topology={}",
+                        self.selected_mode.number_key(),
+                        self.selected_mode.label(),
+                    ),
+                );
+            }
+        }
+        let opacity_pressed = opacity_toggle_down && !self.opacity_toggle_key;
+        self.opacity_toggle_key = opacity_toggle_down;
+        if opacity_pressed {
+            self.frame_is_seventy_percent = !self.frame_is_seventy_percent;
+            let opacity = if self.frame_is_seventy_percent {
+                FRAME_OPACITY_SEVENTY_PERCENT
+            } else {
+                FRAME_OPACITY_OPAQUE
+            };
+            self.frame
+                .set_opacity(opacity)
+                .map_err(|error| DemoError::Ui4("frame-opacity", error))?;
             logl::log(
                 level::INFO,
                 format_args!(
-                    "PotatoStamps: native primitive selected key={} topology={}",
-                    PrimitiveMode::ALL[self.selected_mode].number_key(),
-                    PrimitiveMode::ALL[self.selected_mode].label(),
+                    "PotatoStamps: UI4 frame opacity={}%, key=+",
+                    if self.frame_is_seventy_percent {
+                        70
+                    } else {
+                        100
+                    },
                 ),
             );
         }
@@ -298,7 +336,17 @@ fn execution_vertex_bytes(scene: &Scene, line_grid_xyz: &[u8]) -> Vec<u8> {
         vertices.extend_from_slice(&position.y.to_le_bytes());
         vertices.extend_from_slice(&position.z.to_le_bytes());
     }
+    for position in quad_grid_positions() {
+        vertices.extend_from_slice(&position.x.to_le_bytes());
+        vertices.extend_from_slice(&position.y.to_le_bytes());
+        vertices.extend_from_slice(&position.z.to_le_bytes());
+    }
     vertices.extend_from_slice(line_grid_xyz);
+    for position in rect_list_positions() {
+        vertices.extend_from_slice(&position.x.to_le_bytes());
+        vertices.extend_from_slice(&position.y.to_le_bytes());
+        vertices.extend_from_slice(&position.z.to_le_bytes());
+    }
     debug_assert_eq!(vertices.len(), EXECUTION_VERTEX_COUNT * 12);
     vertices
 }
@@ -378,7 +426,7 @@ fn run() -> Result<(), DemoError> {
         level::INFO,
         format_args!(
             "PotatoStamps: indexed primitive frame submitted and retired mode={} timeline={}",
-            PrimitiveMode::ALL[demo.selected_mode].label(),
+            demo.selected_mode.label(),
             demo.timeline,
         ),
     );
