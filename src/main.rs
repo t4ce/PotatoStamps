@@ -8,10 +8,11 @@ use alloc::vec::Vec;
 use core::fmt;
 use potato_stamps::scene::{
     self, COLOR_TEXTURE_BYTES, COLOR_TEXTURE_NAME, DOCUMENT_BYTES, DOCUMENT_NAME,
-    EXECUTION_INDEX_COUNT, ExecutionIndexCatalogue, PrimitiveMode, STAMP_COUNT, Scene,
-    VERTEX_COUNT, decode_palette_rgba,
+    EXECUTION_INDEX_COUNT, EXECUTION_VERTEX_COUNT, ExecutionIndexCatalogue, LINE_GRID_NAME,
+    LINE_GRID_VERTEX_COUNT, LINE_GRID_XYZ_BYTES, PrimitiveMode, STAMP_COUNT, Scene, VERTEX_COUNT,
+    decode_palette_rgba, line_grid_positions,
 };
-use trueos::ui4_scene::{Damage, Error as Ui4Error, Frame};
+use trueos::ui4_scene::{Damage, Error as Ui4Error, Frame, ResizeEvent};
 use trueos::vgpu::{
     BUFFER_USAGE_INDEX, BUFFER_USAGE_MAP_WRITE, BUFFER_USAGE_VERTEX, Buffer, Capabilities, Device,
     Queue, QueueClass, RenderPipeline, SHADER_PACKAGE_CLIP_POSITION3_IMMEDIATE_RGBA_FNV1A64,
@@ -26,7 +27,11 @@ use trueos_picasso::Picasso;
 
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 360;
-const CLEAR_RGBA8_SRGB: u32 = u32::from_le_bytes([21, 25, 32, 255]);
+// The vGPU clear input is straight RGBA; the UI4 render target is
+// premultiplied before presentation. Keep the PotatoStamps frame backdrop
+// black at two-thirds (66.7%) alpha so the application plane beneath remains
+// visible; the RGB grid triangles themselves remain fully opaque.
+const CLEAR_RGBA8_SRGB: u32 = u32::from_le_bytes([0, 0, 0, 170]);
 
 // Keep the registered package directly `cargo check`-able as a thin no_std
 // Blueprint. TRUEOS's packer detects these declarations for the startup image.
@@ -38,8 +43,9 @@ fn panic(_info: &core::panic::PanicInfo<'_>) -> ! {
     trueos::panic_abort("Potato Stamps panic\n")
 }
 
-/// Picasso-decoded geometry, topology catalogue, and colors are immutable
-/// after `open` uploads the two execution buffers.
+/// Picasso-decoded geometry, the shared 1,000-vertex seed plane, topology
+/// catalogue, and colors are immutable after `open` uploads the two execution
+/// buffers.
 struct PotatoStamps {
     _picasso: Picasso,
     frame: Frame,
@@ -53,6 +59,7 @@ struct PotatoStamps {
     colors: [u32; STAMP_COUNT],
     selected_mode: usize,
     number_keys: u8,
+    pending_resize: Option<ResizeEvent>,
     timeline: u64,
 }
 
@@ -65,6 +72,10 @@ impl PotatoStamps {
         picasso
             .put_embedded_asset(COLOR_TEXTURE_NAME, COLOR_TEXTURE_BYTES)
             .map_err(DemoError::Picasso)?;
+        let line_grid_seed = seed_line_grid_xyz();
+        picasso
+            .put_embedded_asset(LINE_GRID_NAME, &line_grid_seed)
+            .map_err(DemoError::Picasso)?;
         let stored = picasso
             .embedded_asset(DOCUMENT_NAME)
             .map_err(DemoError::Picasso)?
@@ -73,6 +84,13 @@ impl PotatoStamps {
             .embedded_asset(COLOR_TEXTURE_NAME)
             .map_err(DemoError::Picasso)?
             .ok_or(DemoError::MissingPalette)?;
+        let stored_line_grid = picasso
+            .embedded_asset(LINE_GRID_NAME)
+            .map_err(DemoError::Picasso)?
+            .ok_or(DemoError::MissingLineGrid)?;
+        if !valid_line_grid_xyz(&stored_line_grid) {
+            return Err(DemoError::InvalidLineGrid);
+        }
         let scene = Scene::decode(&stored).map_err(DemoError::Scene)?;
 
         let frame = Frame::open_streaming(96, 72, WIDTH, HEIGHT)
@@ -88,7 +106,7 @@ impl PotatoStamps {
         let pipeline = device
             .create_render_pipeline(shader, 12, 0)
             .map_err(|code| DemoError::Vgpu("pipeline-create", code))?;
-        let execution_vertices = execution_vertex_bytes(&scene);
+        let execution_vertices = execution_vertex_bytes(&scene, &stored_line_grid);
         let catalogue = scene.execution_index_catalogue();
         let execution_indices = execution_index_bytes(&catalogue);
         let vertex_buffer = device
@@ -113,12 +131,16 @@ impl PotatoStamps {
         logl::log(
             level::INFO,
             format_args!(
-                "PotatoStamps: Picasso readback accepted document={} document_bytes={} palette={} palette_bytes={} vertices={} execution_indices={} native_modes={}",
+                "PotatoStamps: Picasso readback accepted document={} document_bytes={} palette={} palette_bytes={} line_grid={} line_grid_vertices={} line_grid_bytes={} document_vertices={} execution_vertices={} execution_indices={} native_modes={}",
                 DOCUMENT_NAME,
                 stored.len(),
                 COLOR_TEXTURE_NAME,
                 stored_palette.len(),
+                LINE_GRID_NAME,
+                LINE_GRID_VERTEX_COUNT,
+                stored_line_grid.len(),
                 VERTEX_COUNT,
+                EXECUTION_VERTEX_COUNT,
                 EXECUTION_INDEX_COUNT,
                 scene::PRIMITIVE_MODE_COUNT,
             ),
@@ -136,11 +158,13 @@ impl PotatoStamps {
             colors,
             selected_mode: 3,
             number_keys: 0,
+            pending_resize: None,
             timeline: 0,
         })
     }
 
     fn render_frame(&mut self) -> Result<(), DemoError> {
+        self.service_resize_events()?;
         self.service_mode_hotkeys()?;
         let width = self.frame.width();
         let height = self.frame.height();
@@ -176,6 +200,45 @@ impl PotatoStamps {
         Ok(())
     }
 
+    /// UI4 coalesces resize input to the final requested extent.  Keep the
+    /// event locally until the old frame lease retires: `Frame::resize` can
+    /// transiently report Busy, but the event itself has already been taken.
+    fn service_resize_events(&mut self) -> Result<(), DemoError> {
+        while let Some(event) = self
+            .frame
+            .take_resize_event()
+            .map_err(|error| DemoError::Ui4("resize-event-take", error))?
+        {
+            self.pending_resize = Some(event);
+        }
+
+        let Some(event) = self.pending_resize else {
+            return Ok(());
+        };
+        if (event.width, event.height) == (self.frame.width(), self.frame.height()) {
+            self.pending_resize = None;
+            return Ok(());
+        }
+
+        match self.frame.resize(event.width, event.height) {
+            Ok(()) => {
+                self.pending_resize = None;
+                logl::log(
+                    level::INFO,
+                    format_args!(
+                        "PotatoStamps: UI4 frame resized {}x{} -> {}x{}",
+                        event.old_width, event.old_height, event.width, event.height,
+                    ),
+                );
+            }
+            // A replacement frame cannot be staged until the currently
+            // published GPU lease is available. Retry on the next tick.
+            Err(Ui4Error::Busy) => {}
+            Err(error) => return Err(DemoError::Ui4("frame-resize", error)),
+        }
+        Ok(())
+    }
+
     fn service_mode_hotkeys(&mut self) -> Result<(), DemoError> {
         let state = self
             .frame
@@ -183,8 +246,8 @@ impl PotatoStamps {
             .map_err(|error| DemoError::Ui4("mode-hotkeys", error))?;
         let current = state.map_or(0, |keyboard| {
             let mut bits = 0u8;
-            for slot in 0..scene::PRIMITIVE_MODE_COUNT {
-                if keyboard.is_down(0x1e + slot as u8) {
+            for (slot, mode) in PrimitiveMode::ALL.into_iter().enumerate() {
+                if keyboard.is_down(mode.number_key_hid_usage()) {
                     bits |= 1 << slot;
                 }
             }
@@ -198,7 +261,7 @@ impl PotatoStamps {
                 level::INFO,
                 format_args!(
                     "PotatoStamps: native primitive selected key={} topology={}",
-                    self.selected_mode + 1,
+                    PrimitiveMode::ALL[self.selected_mode].number_key(),
                     PrimitiveMode::ALL[self.selected_mode].label(),
                 ),
             );
@@ -207,13 +270,36 @@ impl PotatoStamps {
     }
 }
 
-fn execution_vertex_bytes(scene: &Scene) -> Vec<u8> {
-    let mut vertices = Vec::with_capacity(VERTEX_COUNT * 12);
+fn seed_line_grid_xyz() -> Vec<u8> {
+    let mut vertices = Vec::with_capacity(LINE_GRID_XYZ_BYTES);
+    for position in line_grid_positions() {
+        vertices.extend_from_slice(&position.x.to_le_bytes());
+        vertices.extend_from_slice(&position.y.to_le_bytes());
+        vertices.extend_from_slice(&position.z.to_le_bytes());
+    }
+    debug_assert_eq!(vertices.len(), LINE_GRID_XYZ_BYTES);
+    vertices
+}
+
+fn valid_line_grid_xyz(bytes: &[u8]) -> bool {
+    bytes.len() == LINE_GRID_XYZ_BYTES
+        && bytes.chunks_exact(12).all(|vertex| {
+            let x = f32::from_le_bytes(vertex[0..4].try_into().expect("four-byte x"));
+            let y = f32::from_le_bytes(vertex[4..8].try_into().expect("four-byte y"));
+            let z = f32::from_le_bytes(vertex[8..12].try_into().expect("four-byte z"));
+            x.is_finite() && y.is_finite() && z == 0.0
+        })
+}
+
+fn execution_vertex_bytes(scene: &Scene, line_grid_xyz: &[u8]) -> Vec<u8> {
+    let mut vertices = Vec::with_capacity(EXECUTION_VERTEX_COUNT * 12);
     for position in &scene.positions {
         vertices.extend_from_slice(&position.x.to_le_bytes());
         vertices.extend_from_slice(&position.y.to_le_bytes());
         vertices.extend_from_slice(&position.z.to_le_bytes());
     }
+    vertices.extend_from_slice(line_grid_xyz);
+    debug_assert_eq!(vertices.len(), EXECUTION_VERTEX_COUNT * 12);
     vertices
 }
 
@@ -236,7 +322,9 @@ fn write_exact(device: Device, buffer: Buffer, bytes: &[u8]) -> Result<(), i32> 
 enum DemoError {
     MissingAsset,
     MissingPalette,
+    MissingLineGrid,
     InvalidPalette,
+    InvalidLineGrid,
     Picasso(trueos_picasso::PicassoError),
     Scene(scene::SceneError),
     Ui4(&'static str, Ui4Error),
@@ -248,7 +336,9 @@ impl fmt::Display for DemoError {
         match self {
             Self::MissingAsset => f.write_str("Picasso did not return the seeded document"),
             Self::MissingPalette => f.write_str("Picasso did not return the seeded palette"),
+            Self::MissingLineGrid => f.write_str("Picasso did not return the seeded line grid"),
             Self::InvalidPalette => f.write_str("Picasso returned an invalid color palette"),
+            Self::InvalidLineGrid => f.write_str("Picasso returned an invalid line grid"),
             Self::Picasso(error) => write!(f, "Picasso storage error: {error}"),
             Self::Scene(error) => write!(f, "scene document error: {error}"),
             Self::Ui4(stage, error) => write!(f, "UI4 {stage} failed: {error:?}"),
