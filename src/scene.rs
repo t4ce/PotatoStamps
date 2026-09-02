@@ -31,13 +31,19 @@ pub const LINE_GRID_VERTEX_COUNT: usize = LINE_GRID_COLUMNS * LINE_GRID_ROWS;
 pub const LINE_GRID_VERTEX_OFFSET: usize = QUAD_GRID_VERTEX_OFFSET + QUAD_GRID_VERTEX_COUNT;
 pub const LINE_GRID_XYZ_BYTES: usize = LINE_GRID_VERTEX_COUNT * 12;
 pub const RGB_COLOR_COUNT: usize = 3;
+/// Key 1 partitions the source-vertex ordinals into two immediate-color
+/// draws.  Ordinals divisible by three are green; the remaining two are red.
+pub const POINT_GRID_GREEN_INDEX_COUNT: usize = (LINE_GRID_VERTEX_COUNT + 2) / 3;
+pub const POINT_GRID_RED_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT - POINT_GRID_GREEN_INDEX_COUNT;
 pub const LINE_GRID_TRIANGLE_LIST_INDEX_COUNT: usize =
     (LINE_GRID_COLUMNS - 1) * (LINE_GRID_ROWS - 1) * 6;
 pub const LINE_GRID_TRIANGLE_LIST_INDICES_PER_RGB_COLOR: usize =
     LINE_GRID_TRIANGLE_LIST_INDEX_COUNT / RGB_COLOR_COUNT;
-/// Key 2's alternate interpretation preserves all 500 regular line segments
-/// and supplies the two adjacent vertices required by each native line object.
-pub const LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT * 2;
+/// Key 2 changes only the topology descriptor. Both interpretations consume
+/// the identical 1,000-index seed range: ordinary LINELIST assembles 500
+/// lines, while LINELIST_ADJ assembles 250 four-input objects whose central
+/// pair is visible and whose outer pair is adjacency-only context.
+pub const LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT;
 /// Key 3's alternate interpretation prepends and appends the adjacency-only
 /// endpoint of the same 1,000-seed snake strip.
 pub const LINE_GRID_LINE_STRIP_ADJ_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT + 2;
@@ -90,7 +96,6 @@ pub const RECT_LIST_INDEX_COUNT: usize = RECT_LIST_CELL_COUNT * RECT_LIST_VERTIC
 pub const EXECUTION_VERTEX_COUNT: usize = RECT_LIST_VERTEX_OFFSET + RECT_LIST_VERTEX_COUNT;
 pub const PRIMITIVE_MODE_COUNT: usize = 14;
 pub const EXECUTION_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT * 3
-    + LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT
     + LINE_GRID_LINE_STRIP_ADJ_INDEX_COUNT
     + LINE_GRID_TRIANGLE_LIST_INDEX_COUNT
     + LINE_GRID_TRIANGLE_LIST_ADJ_INDEX_COUNT
@@ -190,7 +195,10 @@ impl PrimitiveMode {
 
     pub const fn indices_per_draw(self) -> usize {
         match self {
-            Self::PointList | Self::LineList | Self::LineStrip => LINE_GRID_VERTEX_COUNT,
+            // Point-list's two modulo-three partitions deliberately have
+            // unequal ranges. `draw_batch` supplies their exact descriptors.
+            Self::PointList => POINT_GRID_GREEN_INDEX_COUNT,
+            Self::LineList | Self::LineStrip => LINE_GRID_VERTEX_COUNT,
             Self::LineListAdj => LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT,
             Self::LineStripAdj => LINE_GRID_LINE_STRIP_ADJ_INDEX_COUNT,
             Self::TriangleList => LINE_GRID_TRIANGLE_LIST_INDICES_PER_RGB_COLOR,
@@ -207,8 +215,8 @@ impl PrimitiveMode {
 
     pub const fn draw_count(self) -> usize {
         match self {
-            Self::PointList
-            | Self::LineList
+            Self::PointList => 2,
+            Self::LineList
             | Self::LineListAdj
             | Self::LineStrip
             | Self::LineStripAdj
@@ -291,6 +299,13 @@ impl PrimitiveMode {
         }
     }
 
+    pub const fn requires_adjacency_topology_rendering(self) -> bool {
+        matches!(
+            self,
+            Self::LineListAdj | Self::LineStripAdj | Self::TriangleListAdj | Self::TriangleStripAdj
+        )
+    }
+
     /// Select a mode for one newly pressed top-row key.  Repeated Keys 2-5
     /// toggle exactly their ordinary and native-adjacency interpretations;
     /// every other key selects its one mode directly.
@@ -344,7 +359,6 @@ impl ExecutionIndexCatalogue {
         clear_rgba8_srgb: u32,
     ) -> IndexedDrawBatchV2 {
         let mode_slot = mode.slot();
-        let index_count = mode.indices_per_draw() as u32;
         let draw_count = mode.draw_count();
         let mut batch = IndexedDrawBatchV2 {
             clear_rgba8_srgb,
@@ -352,18 +366,43 @@ impl ExecutionIndexCatalogue {
             ..IndexedDrawBatchV2::default()
         };
         for draw in 0..draw_count {
+            let (index_count, first_index, palette_index) = if mode == PrimitiveMode::PointList {
+                // Key 1 prepares the viewer for reinterpreted geometry: seed
+                // ordinals 0, 3, 6, ... are green and all others are red.
+                // These two disjoint index ranges use the existing immediate
+                // per-draw RGBA field; no vertex format or shader ABI changes.
+                if draw == 0 {
+                    (
+                        POINT_GRID_GREEN_INDEX_COUNT as u32,
+                        self.first_indices[mode_slot],
+                        1,
+                    )
+                } else {
+                    (
+                        POINT_GRID_RED_INDEX_COUNT as u32,
+                        self.first_indices[mode_slot] + POINT_GRID_GREEN_INDEX_COUNT as u32,
+                        0,
+                    )
+                }
+            } else {
+                (
+                    mode.indices_per_draw() as u32,
+                    self.first_indices[mode_slot] + draw as u32 * mode.indices_per_draw() as u32,
+                    if mode == PrimitiveMode::TriangleFanMesh10 {
+                        draw % RGB_COLOR_COUNT
+                    } else {
+                        draw
+                    },
+                )
+            };
             batch.draws[draw] = IndexedBatchDrawV2 {
                 index_count,
-                first_index: self.first_indices[mode_slot] + draw as u32 * index_count,
+                first_index,
                 base_vertex: 0,
                 // The 100-fan Key 7 mesh deliberately cycles the opaque RGB
                 // palette while all one-to-four draw modes retain their
                 // authored per-draw palette selection.
-                rgba8_srgb: colors[if mode == PrimitiveMode::TriangleFanMesh10 {
-                    draw % RGB_COLOR_COUNT
-                } else {
-                    draw
-                }],
+                rgba8_srgb: colors[palette_index],
                 topology: mode.vgpu_topology(),
                 reserved: 0,
             };
@@ -454,39 +493,41 @@ impl Scene {
         let mut first_indices = [0; PRIMITIVE_MODE_COUNT];
         let mut cursor = 0usize;
         for (mode_slot, mode) in PrimitiveMode::ALL.into_iter().enumerate() {
+            if mode == PrimitiveMode::LineListAdj {
+                // This is the defining PotatoStamps reinterpretation: Key 2's
+                // second form changes only the topology. It reuses the exact
+                // first index and 1,000-index count of ordinary LINELIST.
+                first_indices[mode_slot] = first_indices[PrimitiveMode::LineList.slot()];
+                continue;
+            }
             first_indices[mode_slot] = cursor as u32;
-            if matches!(mode, PrimitiveMode::PointList | PrimitiveMode::LineList) {
+            if mode == PrimitiveMode::PointList {
+                // Store each immediate-color partition contiguously.  The
+                // source ordinal, rather than screen coordinate, controls the
+                // repeating green, red, red pattern.
+                for grid_vertex in 0..LINE_GRID_VERTEX_COUNT {
+                    if grid_vertex % RGB_COLOR_COUNT == 0 {
+                        indices[cursor] = line_grid_vertex(grid_vertex);
+                        cursor += 1;
+                    }
+                }
+                debug_assert_eq!(
+                    cursor,
+                    first_indices[mode_slot] as usize + POINT_GRID_GREEN_INDEX_COUNT
+                );
+                for grid_vertex in 0..LINE_GRID_VERTEX_COUNT {
+                    if grid_vertex % RGB_COLOR_COUNT != 0 {
+                        indices[cursor] = line_grid_vertex(grid_vertex);
+                        cursor += 1;
+                    }
+                }
+                continue;
+            }
+            if mode == PrimitiveMode::LineList {
                 for grid_vertex in 0..LINE_GRID_VERTEX_COUNT {
                     indices[cursor + grid_vertex] = line_grid_vertex(grid_vertex);
                 }
                 cursor += LINE_GRID_VERTEX_COUNT;
-                continue;
-            }
-            if mode == PrimitiveMode::LineListAdj {
-                // Preserve every ordinary line-list segment as the central
-                // pair.  The outer pair contains its immediate grid
-                // neighbours, or duplicates the central endpoint at a row
-                // boundary to explicitly mark an open edge without creating
-                // any non-seeded vertex.
-                for line in 0..LINE_GRID_VERTEX_COUNT / 2 {
-                    let first = line * 2;
-                    let second = first + 1;
-                    let row_start = first - first % LINE_GRID_COLUMNS;
-                    let row_end = row_start + LINE_GRID_COLUMNS - 1;
-                    let before = if first == row_start { first } else { first - 1 };
-                    let after = if second == row_end {
-                        second
-                    } else {
-                        second + 1
-                    };
-                    indices[cursor..cursor + 4].copy_from_slice(&[
-                        line_grid_vertex(before),
-                        line_grid_vertex(first),
-                        line_grid_vertex(second),
-                        line_grid_vertex(after),
-                    ]);
-                    cursor += 4;
-                }
                 continue;
             }
             if mode == PrimitiveMode::LineStrip {
@@ -1142,16 +1183,32 @@ mod tests {
         assert_eq!(catalogue.indices.len(), EXECUTION_INDEX_COUNT);
         let point_first = catalogue.first_indices[PrimitiveMode::PointList.slot()] as usize;
         let line_list_first = catalogue.first_indices[PrimitiveMode::LineList.slot()] as usize;
+        let line_list_adj_first =
+            catalogue.first_indices[PrimitiveMode::LineListAdj.slot()] as usize;
         let line_strip_first = catalogue.first_indices[PrimitiveMode::LineStrip.slot()] as usize;
         let seed: [u32; LINE_GRID_VERTEX_COUNT] = core::array::from_fn(line_grid_vertex);
-        assert_eq!(
-            &catalogue.indices[point_first..point_first + LINE_GRID_VERTEX_COUNT],
-            &seed
-        );
+        let point_indices = &catalogue.indices[point_first..point_first + LINE_GRID_VERTEX_COUNT];
+        let mut point_seen = [false; LINE_GRID_VERTEX_COUNT];
+        for (ordinal, &index) in point_indices[..POINT_GRID_GREEN_INDEX_COUNT]
+            .iter()
+            .enumerate()
+        {
+            let source_ordinal = index as usize - LINE_GRID_VERTEX_OFFSET;
+            assert_eq!(source_ordinal, ordinal * RGB_COLOR_COUNT);
+            point_seen[source_ordinal] = true;
+        }
+        for &index in &point_indices[POINT_GRID_GREEN_INDEX_COUNT..] {
+            let source_ordinal = index as usize - LINE_GRID_VERTEX_OFFSET;
+            assert_ne!(source_ordinal % RGB_COLOR_COUNT, 0);
+            assert!(!point_seen[source_ordinal]);
+            point_seen[source_ordinal] = true;
+        }
+        assert!(point_seen.into_iter().all(|used| used));
         assert_eq!(
             &catalogue.indices[line_list_first..line_list_first + LINE_GRID_VERTEX_COUNT],
             &seed
         );
+        assert_eq!(line_list_adj_first, line_list_first);
 
         let line_strip =
             &catalogue.indices[line_strip_first..line_strip_first + LINE_GRID_VERTEX_COUNT];
@@ -1410,6 +1467,8 @@ mod tests {
             assert_eq!(ordinary.on_number_key_pressed(key), Some(adjacent));
             assert_eq!(adjacent.on_number_key_pressed(key), Some(ordinary));
             assert_eq!(adjacent.vgpu_topology(), topology);
+            assert!(!ordinary.requires_adjacency_topology_rendering());
+            assert!(adjacent.requires_adjacency_topology_rendering());
         }
         assert_eq!(
             PrimitiveMode::TriangleFan.on_number_key_pressed(4),
@@ -1418,7 +1477,26 @@ mod tests {
     }
 
     #[test]
-    fn adjacency_catalogues_preserve_the_visible_primitives_and_supply_neighbours() {
+    fn key_two_line_list_toggle_changes_only_the_topology_word() {
+        let scene = Scene::decode(DOCUMENT_BYTES).unwrap();
+        let catalogue = scene.execution_index_catalogue();
+        let colors = [0x11, 0x22, 0x33, 0x44];
+        let ordinary = catalogue
+            .draw_batch(PrimitiveMode::LineList, colors, 0)
+            .draws[0];
+        let adjacent = catalogue
+            .draw_batch(PrimitiveMode::LineListAdj, colors, 0)
+            .draws[0];
+
+        let mut expected = ordinary;
+        expected.topology = trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_LIST_ADJ;
+        assert_eq!(adjacent, expected);
+        assert_eq!(ordinary.index_count as usize / 2, 500);
+        assert_eq!(adjacent.index_count as usize / 4, 250);
+    }
+
+    #[test]
+    fn adjacency_catalogues_obey_their_native_input_contracts() {
         let scene = Scene::decode(DOCUMENT_BYTES).unwrap();
         let catalogue = scene.execution_index_catalogue();
         let seed_start = LINE_GRID_VERTEX_OFFSET as u32;
@@ -1431,9 +1509,11 @@ mod tests {
             catalogue.first_indices[PrimitiveMode::LineListAdj.slot()] as usize;
         let line_list_adj = &catalogue.indices
             [line_list_adj_first..line_list_adj_first + LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT];
-        assert_eq!(line_list_adj.len() / 4, line_list.len() / 2);
-        for (ordinary, adjacency) in line_list.chunks_exact(2).zip(line_list_adj.chunks_exact(4)) {
-            assert_eq!(&adjacency[1..3], ordinary);
+        assert_eq!(line_list_adj_first, line_list_first);
+        assert_eq!(line_list_adj, line_list);
+        assert_eq!(line_list.len() / 2, 500);
+        assert_eq!(line_list_adj.len() / 4, 250);
+        for adjacency in line_list_adj.chunks_exact(4) {
             assert!(
                 adjacency
                     .iter()
@@ -1747,21 +1827,38 @@ mod tests {
             assert_eq!(batch.draw_count, mode.draw_count() as u32);
             for (draw_index, draw) in batch.draws[..mode.draw_count()].iter().enumerate() {
                 assert_eq!(draw.topology, mode.vgpu_topology());
-                assert_eq!(draw.index_count, mode.indices_per_draw() as u32);
-                assert_eq!(
-                    draw.first_index,
-                    catalogue.first_indices[mode.slot()]
-                        + draw_index as u32 * mode.indices_per_draw() as u32
-                );
-                assert_eq!(draw.base_vertex, 0);
-                assert_eq!(
-                    draw.rgba8_srgb,
-                    colors[if mode == PrimitiveMode::TriangleFanMesh10 {
-                        draw_index % RGB_COLOR_COUNT
+                let (expected_index_count, expected_first_index, expected_color) =
+                    if mode == PrimitiveMode::PointList {
+                        if draw_index == 0 {
+                            (
+                                POINT_GRID_GREEN_INDEX_COUNT as u32,
+                                catalogue.first_indices[mode.slot()],
+                                colors[1],
+                            )
+                        } else {
+                            (
+                                POINT_GRID_RED_INDEX_COUNT as u32,
+                                catalogue.first_indices[mode.slot()]
+                                    + POINT_GRID_GREEN_INDEX_COUNT as u32,
+                                colors[0],
+                            )
+                        }
                     } else {
-                        draw_index
-                    }]
-                );
+                        (
+                            mode.indices_per_draw() as u32,
+                            catalogue.first_indices[mode.slot()]
+                                + draw_index as u32 * mode.indices_per_draw() as u32,
+                            colors[if mode == PrimitiveMode::TriangleFanMesh10 {
+                                draw_index % RGB_COLOR_COUNT
+                            } else {
+                                draw_index
+                            }],
+                        )
+                    };
+                assert_eq!(draw.index_count, expected_index_count);
+                assert_eq!(draw.first_index, expected_first_index);
+                assert_eq!(draw.base_vertex, 0);
+                assert_eq!(draw.rgba8_srgb, expected_color);
                 assert_eq!(draw.reserved, 0);
             }
             for draw in &batch.draws[mode.draw_count()..] {

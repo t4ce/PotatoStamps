@@ -61,6 +61,7 @@ struct PotatoStamps {
     index_buffer: Buffer,
     catalogue: ExecutionIndexCatalogue,
     colors: [u32; STAMP_COUNT],
+    adjacency_topology_rendering: bool,
     selected_mode: PrimitiveMode,
     number_keys: u16,
     opacity_toggle_key: bool,
@@ -103,6 +104,10 @@ impl PotatoStamps {
             .map_err(|error| DemoError::Ui4("frame-open", error))?;
         let device = Device::open(Capabilities::DEFAULT.union(Capabilities::PRESENT))
             .map_err(|code| DemoError::Vgpu("device-open", code))?;
+        let adjacency_topology_rendering = device
+            .info()
+            .map_err(|code| DemoError::Vgpu("device-info", code))?
+            .supports_adjacency_topology_rendering();
         let queue = device
             .create_queue(QueueClass::Render)
             .map_err(|code| DemoError::Vgpu("queue-create", code))?;
@@ -137,7 +142,7 @@ impl PotatoStamps {
         logl::log(
             level::INFO,
             format_args!(
-                "PotatoStamps: Picasso readback accepted document={} document_bytes={} palette={} palette_bytes={} line_grid={} line_grid_vertices={} line_grid_bytes={} document_vertices={} execution_vertices={} execution_indices={} native_modes={}",
+                "PotatoStamps: Picasso readback accepted document={} document_bytes={} palette={} palette_bytes={} line_grid={} line_grid_vertices={} line_grid_bytes={} document_vertices={} execution_vertices={} execution_indices={} native_modes={} adjacency_topology_rendering={}",
                 DOCUMENT_NAME,
                 stored.len(),
                 COLOR_TEXTURE_NAME,
@@ -149,6 +154,11 @@ impl PotatoStamps {
                 EXECUTION_VERTEX_COUNT,
                 EXECUTION_INDEX_COUNT,
                 scene::PRIMITIVE_MODE_COUNT,
+                if adjacency_topology_rendering {
+                    "available"
+                } else {
+                    "unavailable"
+                },
             ),
         );
         Ok(Self {
@@ -162,6 +172,7 @@ impl PotatoStamps {
             index_buffer,
             catalogue,
             colors,
+            adjacency_topology_rendering,
             selected_mode: PrimitiveMode::TriangleList,
             number_keys: 0,
             opacity_toggle_key: false,
@@ -269,15 +280,28 @@ impl PotatoStamps {
         if pressed != 0 {
             let key = pressed.trailing_zeros() as u8;
             if let Some(next) = self.selected_mode.on_number_key_pressed(key) {
-                self.selected_mode = next;
-                logl::log(
-                    level::INFO,
-                    format_args!(
-                        "PotatoStamps: native primitive selected key={} topology={}",
-                        self.selected_mode.number_key(),
-                        self.selected_mode.label(),
-                    ),
-                );
+                if next.requires_adjacency_topology_rendering()
+                    && !self.adjacency_topology_rendering
+                {
+                    logl::log(
+                        level::WARN,
+                        format_args!(
+                            "PotatoStamps: native primitive unavailable key={} topology={} reason=adjacency-topology-rendering-not-supported; ordinary mode remains selected",
+                            next.number_key(),
+                            next.label(),
+                        ),
+                    );
+                } else {
+                    self.selected_mode = next;
+                    logl::log(
+                        level::INFO,
+                        format_args!(
+                            "PotatoStamps: native primitive selected key={} topology={}",
+                            self.selected_mode.number_key(),
+                            self.selected_mode.label(),
+                        ),
+                    );
+                }
             }
         }
         let opacity_pressed = opacity_toggle_down && !self.opacity_toggle_key;

@@ -20,27 +20,50 @@ There is no build-time prepared render buffer and no second asset path.
 
 ## Primitive experiment
 
-The document holds four colored copies of the same intentionally CCW
-three-point stamp. After Picasso readback, initialization builds and uploads
-one immutable index catalogue containing every primitive assembly mode exposed
-by the TRUEOS V2 batch ABI:
+The authored document holds four colored copies of the same intentionally CCW
+three-point stamp. Picasso also stores the 1,000-vertex `40 x 25` seed plane
+used by the primitive experiment. After readback, initialization builds and
+uploads one immutable index catalogue containing every primitive assembly mode
+exposed by the TRUEOS V2 batch ABI.
 
-| Mode | Topology | Index sequence |
-| --- | --- | --- |
-| `1` | point list | `0, 1, 2` |
-| `2` | line list (closed) | `0, 1, 1, 2, 2, 0` |
-| `3` | line strip (closed) | `0, 1, 2, 0` |
-| `4` | triangle list | `0, 1, 2` |
-| `5` | triangle strip | `0, 1, 2` |
-| `6` | triangle fan | `0, 1, 2` |
+| Key | First press | Second press | Input contract |
+| --- | --- | --- | --- |
+| `1` | point list | point list | seed ordinal modulo 3: green, red, red, repeating |
+| `2` | line list | line-list adjacency | both consume the identical 1,000-index range: 500 ordinary pairs versus 250 groups of `adj0, line0, line1, adj1` |
+| `3` | line strip | line-strip adjacency | at least two ordinary inputs; adjacency adds one endpoint before and after the visible strip |
+| `4` | triangle list | triangle-list adjacency | ordinary groups of three; adjacency groups of six with visible vertices in slots 0, 2, and 4 |
+| `5` | triangle strip | triangle-strip adjacency | at least three ordinary inputs; adjacency requires at least six inputs and visible vertices in even slots |
+| `6` | triangle fan | triangle fan | one closed fan over the seed plane |
+| `7` | 100 triangle fans | same | 100 independent ten-index fans |
+| `8` | quad list | same | groups of four |
+| `9` | quad strip | same | four independent strips |
+| `0` | rectangle list | same | screen-space groups of three |
 
 The vertex and index execution buffers are written once during initialization.
-Press `1` through `6` to select topology; each frame changes only the four draw
-descriptors. Triangle list (`4`) is the startup default. Colors are decoded
+Press `0` through `9` to select topology; keys `2` through `5` toggle their
+ordinary and adjacency forms. Each frame changes only the draw descriptors.
+Triangle list (`4`) is the startup default. Point-list Key `1` is deliberately
+split into two immediate-color draws: source ordinals divisible by three are
+green, while the other two ordinals are red. This makes the `green, red, red`
+partition visible without changing the XYZ vertex layout or shader ABI. Colors are decoded
 from the opaque BMP returned by Picasso and carried as immediate per-draw RGBA,
 so the demo no longer depends on the retained sampled-material probe. This
 immediate pipeline preserves draw order without an implicit depth surface and
 retries transient UI4 or Render0 contention.
+
+## Adjacency availability
+
+The four `_ADJ` modes are not merely different index grouping. The resident
+path also installs checked-in geometry-shader and URB state captured on the
+`0xA780` revision `0x04` RPL-S UHD 770. TRUEOS explicitly admits that target
+and the physical `0x4680` revision `0x0C` ADL-S rig as gfx120 Xe-LP targets.
+The line GS ignores the adjacency-only outer vertices and emits only the
+central pair.
+
+vGPU exposes admission as
+`DeviceInfo::FLAG_ADJACENCY_TOPOLOGY_RENDERING`. Potato Stamps checks the flag
+before rendering; other devices retain the ordinary mode and receive
+`ERR_UNSUPPORTED` before resident submission.
 
 ## Current engine boundary
 
