@@ -5,8 +5,7 @@ edition = "2024"
 publish = false
 description = "Picasso runtime-asset demo: stable potato-stamp vertices with selectable primitive interpretation"
 
-# Blueprint packaging metadata; the app is registered in
-# TRUEOS-Blueprints/apps.json for normal packing and startup selection.
+# This has no state, so its automatically replicatable, Apps only ever loose this if they dont obey: The Lifecycle.
 [package.metadata.trueos-blueprint]
 replicatable = true
 

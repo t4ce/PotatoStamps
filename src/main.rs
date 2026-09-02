@@ -320,13 +320,13 @@ impl PotatoStamps {
                             self.selected_mode.label(),
                             if self.selected_mode == PrimitiveMode::TriangleFan {
                                 match self.fan_vertices_per_draw {
-                                    5 => " vertices-per-fan=5",
-                                    10 => " vertices-per-fan=10",
-                                    25 => " vertices-per-fan=25",
-                                    50 => " vertices-per-fan=50",
-                                    125 => " vertices-per-fan=125",
-                                    250 => " vertices-per-fan=250",
-                                    _ => " vertices-per-fan=1000",
+                                    1024 => " vertices-per-fan=1024",
+                                    512 => " vertices-per-fan=512",
+                                    256 => " vertices-per-fan=256",
+                                    64 => " vertices-per-fan=64",
+                                    32 => " vertices-per-fan=32",
+                                    16 => " vertices-per-fan=16",
+                                    _ => " vertices-per-fan=8",
                                 }
                             } else {
                                 ""

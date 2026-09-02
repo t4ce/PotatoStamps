@@ -21,7 +21,7 @@ There is no build-time prepared render buffer and no second asset path.
 ## Primitive experiment
 
 The authored document holds four colored copies of the same intentionally CCW
-three-point stamp. Picasso also stores the 1,000-vertex `40 x 25` seed plane
+three-point stamp. Picasso also stores the 1,024-vertex `32 x 32` seed plane
 used by the primitive experiment. After readback, initialization builds and
 uploads one immutable index catalogue containing every primitive assembly mode
 exposed by the TRUEOS V2 batch ABI.
@@ -29,12 +29,12 @@ exposed by the TRUEOS V2 batch ABI.
 | Key | First press | Second press | Input contract |
 | --- | --- | --- | --- |
 | `1` | point list | point list | seed ordinal modulo 3: green, red, red, repeating |
-| `2` | line list | line-list adjacency | both consume the identical 1,000-index range: 500 ordinary pairs versus 250 groups of `adj0, line0, line1, adj1` |
-| `3` | line strip | line-strip adjacency | at least two ordinary inputs; adjacency adds one endpoint before and after the visible strip |
-| `4` | triangle list | triangle-list adjacency | ordinary groups of three; adjacency groups of six with visible vertices in slots 0, 2, and 4 |
-| `5` | triangle strip | triangle-strip adjacency | at least three ordinary inputs; adjacency requires at least six inputs and visible vertices in even slots |
-| `6` | triangle fan | triangle fan | repeated presses cycle independent fans of 5, 10, 25, 50, 125, 250, or 1000 vertices |
-| `7` | unbound | — | no function (the former ten-vertex interpretation is on key 6) |
+| `2` | line list | line-list adjacency | adjacency is currently a deliberate clear-only frame |
+| `3` | line strip | line-strip adjacency | adjacency is currently a deliberate clear-only frame |
+| `4` | triangle list | triangle-list adjacency | adjacency is currently a deliberate clear-only frame |
+| `5` | triangle strip | triangle-strip adjacency | adjacency is currently a deliberate clear-only frame |
+| `6` | triangle fan | triangle fan | repeated presses partition the plane into fans of 1024, 512, 256, 64, 32, 16, then 8 vertices |
+| `7` | unbound | — | no function |
 | `8` | quad list | same | groups of four |
 | `9` | quad strip | same | four independent strips |
 | `0` | rectangle list | same | screen-space groups of three |
@@ -53,12 +53,10 @@ retries transient UI4 or Render0 contention.
 
 ## Adjacency availability
 
-The four `_ADJ` modes are not merely different index grouping. The resident
-path also installs checked-in geometry-shader and URB state captured on the
-`0xA780` revision `0x04` RPL-S UHD 770. TRUEOS explicitly admits that target
-and the physical `0x4680` revision `0x0C` ADL-S rig as gfx120 Xe-LP targets.
-The line GS ignores the adjacency-only outer vertices and emits only the
-central pair.
+The four `_ADJ` selections remain wired to their native topology values, but
+currently submit one minimum-size primitive whose indices all name the same
+seed. It is intentionally degenerate, so the result is a clear-only frame.
+This keeps the controls honest until the geometry-shader contract is known.
 
 vGPU exposes admission as
 `DeviceInfo::FLAG_ADJACENCY_TOPOLOGY_RENDERING`. Potato Stamps checks the flag
