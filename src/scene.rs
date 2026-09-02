@@ -64,7 +64,13 @@ pub const LINE_GRID_TRIANGLE_STRIP_ADJ_INDEX_COUNT: usize =
     LINE_GRID_TRIANGLE_STRIP_INDEX_COUNT * 2;
 /// A closed triangle fan has one hub, one visit to every other seed vertex,
 /// and a final repeat of its first rim vertex.
-pub const LINE_GRID_TRIANGLE_FAN_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT + 1;
+pub const LINE_GRID_TRIANGLE_FAN_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT;
+/// Key 6 cycles these independent fan sizes.
+pub const TRIANGLE_FAN_VERTEX_COUNTS: [usize; 7] = [5, 10, 25, 50, 125, 250, 1000];
+pub const TRIANGLE_FAN_CATALOGUE_INDEX_COUNT: usize = TRIANGLE_FAN_VERTEX_COUNTS
+    .iter()
+    .map(|&size| LINE_GRID_VERTEX_COUNT + LINE_GRID_VERTEX_COUNT / size - 1)
+    .sum();
 /// Key 7 partitions the plane into one hundred local 2×5 seed tiles. Each
 /// tile is interpreted as one ten-index native triangle fan.
 pub const TRIANGLE_FAN_MESH_FAN_COUNT: usize = LINE_GRID_VERTEX_COUNT / 10;
@@ -101,7 +107,7 @@ pub const EXECUTION_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT * 3
     + LINE_GRID_TRIANGLE_LIST_ADJ_INDEX_COUNT
     + LINE_GRID_TRIANGLE_STRIP_INDEX_COUNT
     + LINE_GRID_TRIANGLE_STRIP_ADJ_INDEX_COUNT
-    + LINE_GRID_TRIANGLE_FAN_INDEX_COUNT
+    + TRIANGLE_FAN_CATALOGUE_INDEX_COUNT
     + TRIANGLE_FAN_MESH_INDEX_COUNT
     + QUAD_LIST_INDEX_COUNT
     + QUAD_STRIP_DRAW_COUNT * QUAD_STRIP_INDICES_PER_DRAW
@@ -334,7 +340,9 @@ impl PrimitiveMode {
                 _ => Self::TriangleStrip,
             },
             6 => Self::TriangleFan,
-            7 => Self::TriangleFanMesh10,
+            // The former ten-vertex interpretation is now part of key 6's
+            // cycle; key 7 has no function.
+            7 => return None,
             8 => Self::QuadList,
             9 => Self::QuadStrip,
             _ => return None,
@@ -347,6 +355,8 @@ impl PrimitiveMode {
 pub struct ExecutionIndexCatalogue {
     pub indices: [u32; EXECUTION_INDEX_COUNT],
     pub first_indices: [u32; PRIMITIVE_MODE_COUNT],
+    pub fan_first_indices: [u32; 7],
+    pub fan_index_counts: [u32; 7],
 }
 
 impl ExecutionIndexCatalogue {
@@ -358,8 +368,22 @@ impl ExecutionIndexCatalogue {
         colors: [u32; STAMP_COUNT],
         clear_rgba8_srgb: u32,
     ) -> IndexedDrawBatchV2 {
+        self.draw_batch_with_fan_size(mode, colors, clear_rgba8_srgb, LINE_GRID_VERTEX_COUNT)
+    }
+
+    pub fn draw_batch_with_fan_size(
+        &self,
+        mode: PrimitiveMode,
+        colors: [u32; STAMP_COUNT],
+        clear_rgba8_srgb: u32,
+        fan_vertices: usize,
+    ) -> IndexedDrawBatchV2 {
         let mode_slot = mode.slot();
-        let draw_count = mode.draw_count();
+        let draw_count = if mode == PrimitiveMode::TriangleFan {
+            1
+        } else {
+            mode.draw_count()
+        };
         let mut batch = IndexedDrawBatchV2 {
             clear_rgba8_srgb,
             draw_count: draw_count as u32,
@@ -386,9 +410,30 @@ impl ExecutionIndexCatalogue {
                 }
             } else {
                 (
-                    mode.indices_per_draw() as u32,
-                    self.first_indices[mode_slot] + draw as u32 * mode.indices_per_draw() as u32,
-                    if mode == PrimitiveMode::TriangleFanMesh10 {
+                    if mode == PrimitiveMode::TriangleFan {
+                        self.fan_index_counts[TRIANGLE_FAN_VERTEX_COUNTS
+                            .iter()
+                            .position(|&size| size == fan_vertices)
+                            .expect("invalid triangle fan size")]
+                    } else {
+                        mode.indices_per_draw() as u32
+                    },
+                    if mode == PrimitiveMode::TriangleFan {
+                        self.fan_first_indices[TRIANGLE_FAN_VERTEX_COUNTS
+                            .iter()
+                            .position(|&size| size == fan_vertices)
+                            .expect("invalid triangle fan size")]
+                    } else {
+                        self.first_indices[mode_slot]
+                    } + draw as u32
+                        * if mode == PrimitiveMode::TriangleFan {
+                            fan_vertices as u32
+                        } else {
+                            mode.indices_per_draw() as u32
+                        },
+                    if mode == PrimitiveMode::TriangleFanMesh10
+                        || mode == PrimitiveMode::TriangleFan
+                    {
                         draw % RGB_COLOR_COUNT
                     } else {
                         draw
@@ -491,6 +536,8 @@ impl Scene {
     pub fn execution_index_catalogue(&self) -> ExecutionIndexCatalogue {
         let mut indices = [0; EXECUTION_INDEX_COUNT];
         let mut first_indices = [0; PRIMITIVE_MODE_COUNT];
+        let mut fan_first_indices = [0u32; 7];
+        let mut fan_index_counts = [0u32; 7];
         let mut cursor = 0usize;
         for (mode_slot, mode) in PrimitiveMode::ALL.into_iter().enumerate() {
             if mode == PrimitiveMode::LineListAdj {
@@ -662,40 +709,25 @@ impl Scene {
                 continue;
             }
             if mode == PrimitiveMode::TriangleFan {
-                // A fan has one hub. Use the seed nearest the plane centre,
-                // then visit every other seed in counter-clockwise polar
-                // order and repeat the first rim vertex to close the fan.
-                // Collinear seeds on a shared radial line make harmless
-                // degenerate wedges; every non-degenerate wedge is CCW.
-                let hub = triangle_fan_hub_vertex();
-                let mut rim = [0usize; LINE_GRID_VERTEX_COUNT - 1];
-                let mut rim_len = 0usize;
-                for vertex in 0..LINE_GRID_VERTEX_COUNT {
-                    if vertex != hub {
-                        rim[rim_len] = vertex;
-                        rim_len += 1;
+                // Key 6 reinterprets the fixed 1,000-index seed as
+                // independent contiguous fans. The selected fan size is
+                // applied at submission time; the catalogue stores the seed
+                // ordinals once, so no vertices are duplicated or hidden.
+                for (fan_index, &fan_size) in TRIANGLE_FAN_VERTEX_COUNTS.iter().enumerate() {
+                    fan_first_indices[fan_index] = cursor as u32;
+                    let fan_count = LINE_GRID_VERTEX_COUNT / fan_size;
+                    let range_count = LINE_GRID_VERTEX_COUNT + fan_count - 1;
+                    fan_index_counts[fan_index] = range_count as u32;
+                    for vertex in 0..LINE_GRID_VERTEX_COUNT {
+                        indices[cursor] = line_grid_vertex(vertex);
+                        cursor += 1;
+                        if vertex % fan_size == fan_size - 1 && vertex + 1 < LINE_GRID_VERTEX_COUNT
+                        {
+                            indices[cursor] = u32::MAX;
+                            cursor += 1;
+                        }
                     }
                 }
-                debug_assert_eq!(rim_len, rim.len());
-                for candidate_index in 1..rim.len() {
-                    let candidate = rim[candidate_index];
-                    let mut insertion = candidate_index;
-                    while insertion > 0
-                        && triangle_fan_angle_precedes(candidate, rim[insertion - 1])
-                    {
-                        rim[insertion] = rim[insertion - 1];
-                        insertion -= 1;
-                    }
-                    rim[insertion] = candidate;
-                }
-                indices[cursor] = line_grid_vertex(hub);
-                cursor += 1;
-                for &vertex in &rim {
-                    indices[cursor] = line_grid_vertex(vertex);
-                    cursor += 1;
-                }
-                indices[cursor] = line_grid_vertex(rim[0]);
-                cursor += 1;
                 continue;
             }
             if mode == PrimitiveMode::TriangleFanMesh10 {
@@ -802,6 +834,8 @@ impl Scene {
         ExecutionIndexCatalogue {
             indices,
             first_indices,
+            fan_first_indices,
+            fan_index_counts,
         }
     }
 }
@@ -993,34 +1027,6 @@ const fn rect_list_vertex(rectangle: usize, corner: usize) -> u32 {
     (RECT_LIST_VERTEX_OFFSET + rectangle * RECT_LIST_VERTICES_PER_RECTANGLE + corner) as u32
 }
 
-const fn triangle_fan_hub_vertex() -> usize {
-    (LINE_GRID_ROWS / 2) * LINE_GRID_COLUMNS + LINE_GRID_COLUMNS / 2
-}
-
-/// Order two seed vertices counter-clockwise around the fan hub without
-/// floating point. A squared-distance tie-break makes collinear ray ordering
-/// deterministic; those adjacent fan wedges are degenerate by construction.
-const fn triangle_fan_angle_precedes(a: usize, b: usize) -> bool {
-    let hub_row = (LINE_GRID_ROWS / 2) as i32;
-    let hub_column = (LINE_GRID_COLUMNS / 2) as i32;
-    let ax = (a % LINE_GRID_COLUMNS) as i32 - hub_column;
-    let ay = (a / LINE_GRID_COLUMNS) as i32 - hub_row;
-    let bx = (b % LINE_GRID_COLUMNS) as i32 - hub_column;
-    let by = (b / LINE_GRID_COLUMNS) as i32 - hub_row;
-    let a_upper_half = ay > 0 || (ay == 0 && ax >= 0);
-    let b_upper_half = by > 0 || (by == 0 && bx >= 0);
-    if a_upper_half != b_upper_half {
-        return a_upper_half;
-    }
-    let cross = ax * by - ay * bx;
-    if cross != 0 {
-        return cross > 0;
-    }
-    let a_radius_squared = ax * ax + ay * ay;
-    let b_radius_squared = bx * bx + by * by;
-    a_radius_squared < b_radius_squared
-}
-
 /// Return one unique seed vertex for a ten-index local fan. The 2×5 tiles
 /// exactly partition the 40×25 seed plane: 20 tiles across by five tiles high.
 fn triangle_fan_mesh_seed_vertex(fan: usize, slot: usize) -> usize {
@@ -1141,11 +1147,7 @@ mod tests {
     #[test]
     fn native_quad_and_rectangle_modes_have_the_requested_hotkeys() {
         assert_eq!(PrimitiveMode::TriangleFan.number_key(), 6);
-        assert_eq!(PrimitiveMode::TriangleFanMesh10.number_key(), 7);
-        assert_eq!(
-            PrimitiveMode::TriangleFanMesh10.number_key_hid_usage(),
-            0x24
-        );
+        assert_eq!(PrimitiveMode::TriangleFan.on_number_key_pressed(7), None);
         assert_eq!(PrimitiveMode::QuadList.number_key(), 8);
         assert_eq!(PrimitiveMode::QuadList.number_key_hid_usage(), 0x25);
         assert_eq!(PrimitiveMode::QuadStrip.number_key(), 9);
@@ -1248,9 +1250,9 @@ mod tests {
         assert_eq!(
             &catalogue.indices[triangle_fan_first..triangle_fan_first + 3],
             &[
-                line_grid_vertex(triangle_fan_hub_vertex()),
-                line_grid_vertex(triangle_fan_hub_vertex() + 1),
-                line_grid_vertex(triangle_fan_hub_vertex() + 2),
+                line_grid_vertex(0),
+                line_grid_vertex(1),
+                line_grid_vertex(2)
             ]
         );
         let triangle_fan_mesh_first =
@@ -1319,7 +1321,7 @@ mod tests {
             catalogue
                 .indices
                 .into_iter()
-                .all(|index| index < EXECUTION_VERTEX_COUNT as u32)
+                .all(|index| index == u32::MAX || index < EXECUTION_VERTEX_COUNT as u32)
         );
     }
 
@@ -1583,33 +1585,50 @@ mod tests {
     }
 
     #[test]
-    fn triangle_fan_maps_all_thousand_seed_vertices_from_a_central_hub() {
+    fn triangle_fan_partitions_all_thousand_seed_vertices() {
         let scene = Scene::decode(DOCUMENT_BYTES).unwrap();
         let catalogue = scene.execution_index_catalogue();
         let first = catalogue.first_indices[PrimitiveMode::TriangleFan.slot()] as usize;
-        let fan = &catalogue.indices[first..first + LINE_GRID_TRIANGLE_FAN_INDEX_COUNT];
-        assert_eq!(fan[0], line_grid_vertex(triangle_fan_hub_vertex()));
+        let fan = &catalogue.indices[first..first + catalogue.fan_index_counts[0] as usize];
+        assert_eq!(fan[0], line_grid_vertex(0));
         assert_eq!(
-            fan[1],
             fan[fan.len() - 1],
-            "fan rim closes at its first vertex"
+            line_grid_vertex(LINE_GRID_VERTEX_COUNT - 1)
         );
-
-        let grid = line_grid_positions();
         let mut used = [false; LINE_GRID_VERTEX_COUNT];
         for &index in fan {
-            used[index as usize - LINE_GRID_VERTEX_OFFSET] = true;
+            if index != u32::MAX {
+                used[index as usize - LINE_GRID_VERTEX_OFFSET] = true;
+            }
         }
         assert!(used.into_iter().all(|vertex| vertex));
 
-        let hub = grid[fan[0] as usize - LINE_GRID_VERTEX_OFFSET];
-        for rim in fan[1..].windows(2) {
-            let b = grid[rim[0] as usize - LINE_GRID_VERTEX_OFFSET];
-            let c = grid[rim[1] as usize - LINE_GRID_VERTEX_OFFSET];
-            let twice_area = (b.x - hub.x) * (c.y - hub.y) - (b.y - hub.y) * (c.x - hub.x);
-            assert!(
-                twice_area >= -1e-6,
-                "fan wedge is clockwise: area={twice_area}"
+        for &size in &TRIANGLE_FAN_VERTEX_COUNTS {
+            let batch =
+                catalogue.draw_batch_with_fan_size(PrimitiveMode::TriangleFan, [0; 4], 0, size);
+            assert_eq!(batch.draw_count, 1);
+            let fan_index = TRIANGLE_FAN_VERTEX_COUNTS
+                .iter()
+                .position(|&value| value == size)
+                .unwrap();
+            let start = catalogue.fan_first_indices[fan_index] as usize;
+            let range = &catalogue.indices[start..start + batch.draws[0].index_count as usize];
+            assert_eq!(
+                range.iter().filter(|&&index| index == u32::MAX).count(),
+                LINE_GRID_VERTEX_COUNT / size - 1
+            );
+            let mut seen = [false; LINE_GRID_VERTEX_COUNT];
+            for &index in range {
+                if index != u32::MAX {
+                    let local = index as usize - LINE_GRID_VERTEX_OFFSET;
+                    assert!(!seen[local]);
+                    seen[local] = true;
+                }
+            }
+            assert!(seen.into_iter().all(|vertex| vertex));
+            assert_eq!(
+                batch.draws[0].index_count as usize,
+                LINE_GRID_VERTEX_COUNT + LINE_GRID_VERTEX_COUNT / size - 1
             );
         }
     }
@@ -1845,10 +1864,20 @@ mod tests {
                         }
                     } else {
                         (
-                            mode.indices_per_draw() as u32,
-                            catalogue.first_indices[mode.slot()]
-                                + draw_index as u32 * mode.indices_per_draw() as u32,
-                            colors[if mode == PrimitiveMode::TriangleFanMesh10 {
+                            if mode == PrimitiveMode::TriangleFan {
+                                catalogue.fan_index_counts[6]
+                            } else {
+                                mode.indices_per_draw() as u32
+                            },
+                            if mode == PrimitiveMode::TriangleFan {
+                                catalogue.fan_first_indices[6]
+                            } else {
+                                catalogue.first_indices[mode.slot()]
+                                    + draw_index as u32 * mode.indices_per_draw() as u32
+                            },
+                            colors[if mode == PrimitiveMode::TriangleFanMesh10
+                                || mode == PrimitiveMode::TriangleFan
+                            {
                                 draw_index % RGB_COLOR_COUNT
                             } else {
                                 draw_index

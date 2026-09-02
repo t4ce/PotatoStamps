@@ -33,8 +33,8 @@ exposed by the TRUEOS V2 batch ABI.
 | `3` | line strip | line-strip adjacency | at least two ordinary inputs; adjacency adds one endpoint before and after the visible strip |
 | `4` | triangle list | triangle-list adjacency | ordinary groups of three; adjacency groups of six with visible vertices in slots 0, 2, and 4 |
 | `5` | triangle strip | triangle-strip adjacency | at least three ordinary inputs; adjacency requires at least six inputs and visible vertices in even slots |
-| `6` | triangle fan | triangle fan | one closed fan over the seed plane |
-| `7` | 100 triangle fans | same | 100 independent ten-index fans |
+| `6` | triangle fan | triangle fan | repeated presses cycle independent fans of 5, 10, 25, 50, 125, 250, or 1000 vertices |
+| `7` | unbound | — | no function (the former ten-vertex interpretation is on key 6) |
 | `8` | quad list | same | groups of four |
 | `9` | quad strip | same | four independent strips |
 | `0` | rectangle list | same | screen-space groups of three |
@@ -42,7 +42,7 @@ exposed by the TRUEOS V2 batch ABI.
 The vertex and index execution buffers are written once during initialization.
 Press `0` through `9` to select topology; keys `2` through `5` toggle their
 ordinary and adjacency forms. Each frame changes only the draw descriptors.
-Triangle list (`4`) is the startup default. Point-list Key `1` is deliberately
+Point-list dots (`1`) are the startup default. Point-list Key `1` is deliberately
 split into two immediate-color draws: source ordinals divisible by three are
 green, while the other two ordinals are red. This makes the `green, red, red`
 partition visible without changing the XYZ vertex layout or shader ABI. Colors are decoded

@@ -9,8 +9,9 @@ use core::fmt;
 use potato_stamps::scene::{
     self, COLOR_TEXTURE_BYTES, COLOR_TEXTURE_NAME, DOCUMENT_BYTES, DOCUMENT_NAME,
     EXECUTION_INDEX_COUNT, EXECUTION_VERTEX_COUNT, ExecutionIndexCatalogue, LINE_GRID_NAME,
-    LINE_GRID_VERTEX_COUNT, LINE_GRID_XYZ_BYTES, PrimitiveMode, STAMP_COUNT, Scene, VERTEX_COUNT,
-    decode_palette_rgba, line_grid_positions, quad_grid_positions, rect_list_positions,
+    LINE_GRID_VERTEX_COUNT, LINE_GRID_XYZ_BYTES, PrimitiveMode, STAMP_COUNT, Scene,
+    TRIANGLE_FAN_VERTEX_COUNTS, VERTEX_COUNT, decode_palette_rgba, line_grid_positions,
+    quad_grid_positions, rect_list_positions,
 };
 use trueos::ui4_scene::{Damage, Error as Ui4Error, Frame, ResizeEvent};
 use trueos::vgpu::{
@@ -63,6 +64,7 @@ struct PotatoStamps {
     colors: [u32; STAMP_COUNT],
     adjacency_topology_rendering: bool,
     selected_mode: PrimitiveMode,
+    fan_vertices_per_draw: usize,
     number_keys: u16,
     opacity_toggle_key: bool,
     frame_is_seventy_percent: bool,
@@ -173,7 +175,8 @@ impl PotatoStamps {
             catalogue,
             colors,
             adjacency_topology_rendering,
-            selected_mode: PrimitiveMode::TriangleList,
+            selected_mode: PrimitiveMode::PointList,
+            fan_vertices_per_draw: TRIANGLE_FAN_VERTEX_COUNTS[0],
             number_keys: 0,
             opacity_toggle_key: false,
             frame_is_seventy_percent: false,
@@ -202,8 +205,12 @@ impl PotatoStamps {
                 self.pipeline,
                 self.vertex_buffer,
                 self.index_buffer,
-                self.catalogue
-                    .draw_batch(self.selected_mode, self.colors, CLEAR_RGBA8_SRGB),
+                self.catalogue.draw_batch_with_fan_size(
+                    self.selected_mode,
+                    self.colors,
+                    CLEAR_RGBA8_SRGB,
+                    self.fan_vertices_per_draw,
+                ),
             )
             .map_err(|code| DemoError::Vgpu("indexed-batch-v2-submit", code))?;
         self.device
@@ -279,6 +286,18 @@ impl PotatoStamps {
         self.number_keys = current;
         if pressed != 0 {
             let key = pressed.trailing_zeros() as u8;
+            if key == 6 {
+                if self.selected_mode == PrimitiveMode::TriangleFan {
+                    let current = TRIANGLE_FAN_VERTEX_COUNTS
+                        .iter()
+                        .position(|&size| size == self.fan_vertices_per_draw)
+                        .unwrap_or(0);
+                    self.fan_vertices_per_draw = TRIANGLE_FAN_VERTEX_COUNTS
+                        [(current + 1) % TRIANGLE_FAN_VERTEX_COUNTS.len()];
+                } else {
+                    self.fan_vertices_per_draw = TRIANGLE_FAN_VERTEX_COUNTS[0];
+                }
+            }
             if let Some(next) = self.selected_mode.on_number_key_pressed(key) {
                 if next.requires_adjacency_topology_rendering()
                     && !self.adjacency_topology_rendering
@@ -296,9 +315,22 @@ impl PotatoStamps {
                     logl::log(
                         level::INFO,
                         format_args!(
-                            "PotatoStamps: native primitive selected key={} topology={}",
+                            "PotatoStamps: native primitive selected key={} topology={}{}",
                             self.selected_mode.number_key(),
                             self.selected_mode.label(),
+                            if self.selected_mode == PrimitiveMode::TriangleFan {
+                                match self.fan_vertices_per_draw {
+                                    5 => " vertices-per-fan=5",
+                                    10 => " vertices-per-fan=10",
+                                    25 => " vertices-per-fan=25",
+                                    50 => " vertices-per-fan=50",
+                                    125 => " vertices-per-fan=125",
+                                    250 => " vertices-per-fan=250",
+                                    _ => " vertices-per-fan=1000",
+                                }
+                            } else {
+                                ""
+                            },
                         ),
                     );
                 }
