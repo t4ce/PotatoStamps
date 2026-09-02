@@ -11,7 +11,7 @@ use potato_stamps::scene::{
     EXECUTION_INDEX_COUNT, EXECUTION_VERTEX_COUNT, ExecutionIndexCatalogue, LINE_GRID_NAME,
     LINE_GRID_VERTEX_COUNT, LINE_GRID_XYZ_BYTES, PrimitiveMode, STAMP_COUNT, Scene,
     TRIANGLE_FAN_VERTEX_COUNTS, VERTEX_COUNT, decode_palette_rgba, line_grid_positions,
-    quad_grid_positions, rect_list_positions,
+    quad_strip_ring_positions, rect_list_positions,
 };
 use trueos::ui4_scene::{Damage, Error as Ui4Error, Frame, ResizeEvent};
 use trueos::vgpu::{
@@ -392,7 +392,7 @@ fn execution_vertex_bytes(scene: &Scene, line_grid_xyz: &[u8]) -> Vec<u8> {
         vertices.extend_from_slice(&position.y.to_le_bytes());
         vertices.extend_from_slice(&position.z.to_le_bytes());
     }
-    for position in quad_grid_positions() {
+    for position in quad_strip_ring_positions() {
         vertices.extend_from_slice(&position.x.to_le_bytes());
         vertices.extend_from_slice(&position.y.to_le_bytes());
         vertices.extend_from_slice(&position.z.to_le_bytes());

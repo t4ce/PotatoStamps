@@ -21,6 +21,7 @@ path = "src/lib.rs"
 [dependencies]
 trueos = { path = "../TRUEOS-Blueprints/api" }
 trueos-picasso = { path = "../TRUEOS-Picasso", default-features = false, features = ["blueprint"] }
+trueos-math = { path = "../TRUEOS-Blueprints/crates/trueos-math" }
 
 [dev-dependencies]
 # redb's in-memory Blueprint backend is `no_std` in production.  Its host

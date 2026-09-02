@@ -35,9 +35,9 @@ exposed by the TRUEOS V2 batch ABI.
 | `5` | triangle strip | triangle-strip adjacency | adjacency is currently a deliberate clear-only frame |
 | `6` | triangle fan | triangle fan | repeated presses partition the plane into fans of 1024, 512, 256, 64, 32, 16, then 8 vertices |
 | `7` | unbound | — | no function |
-| `8` | quad list | same | groups of four |
-| `9` | quad strip | same | four independent strips |
-| `0` | rectangle list | same | screen-space groups of three |
+| `8` | 256-quads gap grid | two gapped quad rings | repeated presses toggle the original 1,024-seed grid and a QUADLIST reinterpretation of Key 9's exact ring vertices |
+| `9` | quad strip | same | two independent thin 64-segment annuli; each first inner/outer pair repeats only to close its strip |
+| `0` | rectangle list | same | two rings of equal screen-space rectangles; three explicit corners, fourth implied |
 
 The vertex and index execution buffers are written once during initialization.
 Press `0` through `9` to select topology; keys `2` through `5` toggle their

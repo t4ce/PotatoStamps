@@ -105,6 +105,7 @@ name = "potato-stamps"
 version = "0.1.0"
 dependencies = [
  "trueos",
+ "trueos-math",
  "trueos-picasso",
 ]
 
