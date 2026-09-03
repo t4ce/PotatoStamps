@@ -25,8 +25,11 @@ pub const LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT: usize = adjacency::LINE_LIST_INDE
 pub const LINE_GRID_LINE_STRIP_ADJ_INDEX_COUNT: usize = adjacency::LINE_STRIP_INDEX_COUNT;
 pub const LINE_GRID_TRIANGLE_LIST_ADJ_INDEX_COUNT: usize = adjacency::TRIANGLE_LIST_INDEX_COUNT;
 pub const LINE_GRID_TRIANGLE_STRIP_ADJ_INDEX_COUNT: usize = adjacency::TRIANGLE_STRIP_INDEX_COUNT;
-pub const PRIMITIVE_MODE_COUNT: usize = 14;
+pub const PRIMITIVE_MODE_COUNT: usize = 17;
 pub const EXECUTION_INDEX_COUNT: usize = LINE_GRID_VERTEX_COUNT * 3
+    + POINT_RING_INDEX_COUNT
+    + LINE_LIST_RING_INDEX_COUNT
+    + LINE_STRIP_RING_INDEX_COUNT
     + LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT
     + LINE_GRID_LINE_STRIP_ADJ_INDEX_COUNT
     + LINE_GRID_TRIANGLE_LIST_INDEX_COUNT
@@ -73,9 +76,12 @@ pub struct Scene {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveMode {
     PointList,
+    PointListRings,
     LineList,
+    LineListRings,
     LineListAdj,
     LineStrip,
+    LineStripRings,
     LineStripAdj,
     TriangleList,
     TriangleListAdj,
@@ -91,9 +97,12 @@ pub enum PrimitiveMode {
 impl PrimitiveMode {
     pub const ALL: [Self; PRIMITIVE_MODE_COUNT] = [
         Self::PointList,
+        Self::PointListRings,
         Self::LineList,
+        Self::LineListRings,
         Self::LineListAdj,
         Self::LineStrip,
+        Self::LineStripRings,
         Self::LineStripAdj,
         Self::TriangleList,
         Self::TriangleListAdj,
@@ -109,9 +118,12 @@ impl PrimitiveMode {
     pub const fn label(self) -> &'static str {
         match self {
             Self::PointList => "point-list-grid",
+            Self::PointListRings => "point-list-four-circles",
             Self::LineList => "line-list-grid",
+            Self::LineListRings => "line-list-four-dashed-circles",
             Self::LineListAdj => "line-list-adj-grid",
             Self::LineStrip => "line-strip-grid",
+            Self::LineStripRings => "line-strip-four-circles",
             Self::LineStripAdj => "line-strip-adj-grid",
             Self::TriangleList => "triangle-list-grid",
             Self::TriangleListAdj => "triangle-list-adj-grid",
@@ -130,8 +142,11 @@ impl PrimitiveMode {
             // Point-list's two modulo-three partitions deliberately have
             // unequal ranges. `draw_batch` supplies their exact descriptors.
             Self::PointList => POINT_GRID_GREEN_INDEX_COUNT,
+            Self::PointListRings => POINT_RING_INDICES_PER_DRAW,
             Self::LineList | Self::LineStrip => LINE_GRID_VERTEX_COUNT,
+            Self::LineListRings => LINE_LIST_RING_INDICES_PER_DRAW,
             Self::LineListAdj => LINE_GRID_LINE_LIST_ADJ_INDEX_COUNT,
+            Self::LineStripRings => LINE_STRIP_RING_INDICES_PER_DRAW,
             Self::LineStripAdj => LINE_GRID_LINE_STRIP_ADJ_INDEX_COUNT,
             Self::TriangleList => TRIANGLE_LIST_COLOR0_INDEX_COUNT,
             Self::TriangleListAdj => LINE_GRID_TRIANGLE_LIST_ADJ_INDEX_COUNT,
@@ -148,6 +163,9 @@ impl PrimitiveMode {
     pub const fn draw_count(self) -> usize {
         match self {
             Self::PointList => 2,
+            Self::PointListRings => POINT_RING_DRAW_COUNT,
+            Self::LineListRings => LINE_LIST_RING_DRAW_COUNT,
+            Self::LineStripRings => LINE_STRIP_RING_DRAW_COUNT,
             Self::LineList
             | Self::LineListAdj
             | Self::LineStrip
@@ -171,19 +189,22 @@ impl PrimitiveMode {
     pub const fn slot(self) -> usize {
         match self {
             Self::PointList => 0,
-            Self::LineList => 1,
-            Self::LineListAdj => 2,
-            Self::LineStrip => 3,
-            Self::LineStripAdj => 4,
-            Self::TriangleList => 5,
-            Self::TriangleListAdj => 6,
-            Self::TriangleStrip => 7,
-            Self::TriangleStripAdj => 8,
-            Self::TriangleFan => 9,
-            Self::QuadList => 10,
-            Self::QuadListRings => 11,
-            Self::QuadStrip => 12,
-            Self::RectList => 13,
+            Self::PointListRings => 1,
+            Self::LineList => 2,
+            Self::LineListRings => 3,
+            Self::LineListAdj => 4,
+            Self::LineStrip => 5,
+            Self::LineStripRings => 6,
+            Self::LineStripAdj => 7,
+            Self::TriangleList => 8,
+            Self::TriangleListAdj => 9,
+            Self::TriangleStrip => 10,
+            Self::TriangleStripAdj => 11,
+            Self::TriangleFan => 12,
+            Self::QuadList => 13,
+            Self::QuadListRings => 14,
+            Self::QuadStrip => 15,
+            Self::RectList => 16,
         }
     }
 
@@ -192,9 +213,9 @@ impl PrimitiveMode {
     /// pressing the same key while it is selected toggles the interpretation.
     pub const fn number_key(self) -> u8 {
         match self {
-            Self::PointList => 1,
-            Self::LineList | Self::LineListAdj => 2,
-            Self::LineStrip | Self::LineStripAdj => 3,
+            Self::PointList | Self::PointListRings => 1,
+            Self::LineList | Self::LineListRings | Self::LineListAdj => 2,
+            Self::LineStrip | Self::LineStripRings | Self::LineStripAdj => 3,
             Self::TriangleList | Self::TriangleListAdj => 4,
             Self::TriangleStrip | Self::TriangleStripAdj => 5,
             Self::TriangleFan => 6,
@@ -214,10 +235,10 @@ impl PrimitiveMode {
 
     pub const fn vgpu_topology(self) -> u32 {
         match self {
-            Self::PointList => trueos::vgpu::PRIMITIVE_TOPOLOGY_POINT_LIST,
-            Self::LineList => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_LIST,
+            Self::PointList | Self::PointListRings => trueos::vgpu::PRIMITIVE_TOPOLOGY_POINT_LIST,
+            Self::LineList | Self::LineListRings => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_LIST,
             Self::LineListAdj => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_LIST_ADJ,
-            Self::LineStrip => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_STRIP,
+            Self::LineStrip | Self::LineStripRings => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_STRIP,
             Self::LineStripAdj => trueos::vgpu::PRIMITIVE_TOPOLOGY_LINE_STRIP_ADJ,
             Self::TriangleList => trueos::vgpu::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
             Self::TriangleListAdj => trueos::vgpu::PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_ADJ,
@@ -234,20 +255,25 @@ impl PrimitiveMode {
         adjacency::is_adjacency_mode(self)
     }
 
-    /// Select a mode for one newly pressed top-row key.  Repeated Keys 2-5
-    /// toggle exactly their ordinary and native-adjacency interpretations;
-    /// every other key selects its one mode directly.
+    /// Keys 1-3 add circle interpretations before the existing adjacency
+    /// stages. Other topology toggles retain their previous cycles.
     pub const fn on_number_key_pressed(self, key: u8) -> Option<Self> {
         let next = match key {
             0 => Self::RectList,
-            1 => Self::PointList,
+            1 => match self {
+                Self::PointList => Self::PointListRings,
+                Self::PointListRings => Self::PointList,
+                _ => Self::PointList,
+            },
             2 => match self {
-                Self::LineList => Self::LineListAdj,
+                Self::LineList => Self::LineListRings,
+                Self::LineListRings => Self::LineListAdj,
                 Self::LineListAdj => Self::LineList,
                 _ => Self::LineList,
             },
             3 => match self {
-                Self::LineStrip => Self::LineStripAdj,
+                Self::LineStrip => Self::LineStripRings,
+                Self::LineStripRings => Self::LineStripAdj,
                 Self::LineStripAdj => Self::LineStrip,
                 _ => Self::LineStrip,
             },
@@ -712,7 +738,31 @@ mod current_tests {
     #[test]
     fn key_seven_is_unbound_and_point_list_is_default_shape() {
         assert_eq!(PrimitiveMode::PointList.on_number_key_pressed(7), None);
-        assert_eq!(PrimitiveMode::ALL.len(), 14);
+        assert_eq!(PrimitiveMode::ALL.len(), 17);
+        assert_eq!(
+            PrimitiveMode::PointList.on_number_key_pressed(1),
+            Some(PrimitiveMode::PointListRings)
+        );
+        assert_eq!(
+            PrimitiveMode::PointListRings.on_number_key_pressed(1),
+            Some(PrimitiveMode::PointList)
+        );
+        assert_eq!(
+            PrimitiveMode::LineList.on_number_key_pressed(2),
+            Some(PrimitiveMode::LineListRings)
+        );
+        assert_eq!(
+            PrimitiveMode::LineListRings.on_number_key_pressed(2),
+            Some(PrimitiveMode::LineListAdj)
+        );
+        assert_eq!(
+            PrimitiveMode::LineStrip.on_number_key_pressed(3),
+            Some(PrimitiveMode::LineStripRings)
+        );
+        assert_eq!(
+            PrimitiveMode::LineStripRings.on_number_key_pressed(3),
+            Some(PrimitiveMode::LineStripAdj)
+        );
         assert_eq!(
             PrimitiveMode::QuadList.on_number_key_pressed(8),
             Some(PrimitiveMode::QuadListRings)
@@ -725,6 +775,46 @@ mod current_tests {
         assert_eq!(batch.draw_count, 2);
         assert_eq!(batch.draws[0].index_count as usize, POINT_GRID_GREEN_INDEX_COUNT);
         assert_eq!(batch.draws[1].index_count as usize, POINT_GRID_RED_INDEX_COUNT);
+    }
+
+    #[test]
+    fn point_line_and_strip_circle_modes_share_the_four_ring_paths() {
+        let catalogue = catalogue();
+        for mode in [
+            PrimitiveMode::PointListRings,
+            PrimitiveMode::LineListRings,
+        ] {
+            let first = catalogue.first_indices[mode.slot()] as usize;
+            let indices = &catalogue.indices[first..first + QUAD_STRIP_RING_VERTEX_COUNT];
+            for circle in 0..RING_CIRCLE_COUNT {
+                for step in 0..RING_CIRCLE_VERTEX_COUNT {
+                    assert_eq!(
+                        indices[circle * RING_CIRCLE_VERTEX_COUNT + step],
+                        base::ring_circle_vertex(circle, step)
+                    );
+                }
+            }
+            let batch = catalogue.draw_batch(mode, [1, 2, 3, 4], 0);
+            assert_eq!(batch.draw_count as usize, RING_CIRCLE_COUNT);
+        }
+
+        let mode = PrimitiveMode::LineStripRings;
+        let first = catalogue.first_indices[mode.slot()] as usize;
+        for circle in 0..RING_CIRCLE_COUNT {
+            let circle_first = first + circle * LINE_STRIP_RING_INDICES_PER_DRAW;
+            let strip = &catalogue.indices
+                [circle_first..circle_first + LINE_STRIP_RING_INDICES_PER_DRAW];
+            assert_eq!(strip[0], strip[RING_CIRCLE_VERTEX_COUNT]);
+            for step in 0..RING_CIRCLE_VERTEX_COUNT {
+                assert_eq!(strip[step], base::ring_circle_vertex(circle, step));
+            }
+        }
+        let batch = catalogue.draw_batch(mode, [1, 2, 3, 4], 0);
+        assert_eq!(batch.draw_count as usize, RING_CIRCLE_COUNT);
+        assert_eq!(
+            batch.draws[0].index_count as usize,
+            LINE_STRIP_RING_INDICES_PER_DRAW
+        );
     }
 
     #[test]

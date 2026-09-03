@@ -26,22 +26,23 @@ used by the primitive experiment. After readback, initialization builds and
 uploads one immutable index catalogue containing every primitive assembly mode
 exposed by the TRUEOS V2 batch ABI.
 
-| Key | First press | Second press | Input contract |
-| --- | --- | --- | --- |
-| `1` | point list | point list | seed ordinal modulo 3: green, red, red, repeating |
-| `2` | line list | line-list adjacency | adjacency is currently a deliberate clear-only frame |
-| `3` | line strip | line-strip adjacency | adjacency is currently a deliberate clear-only frame |
-| `4` | triangle list | triangle-list adjacency | adjacency is currently a deliberate clear-only frame |
-| `5` | triangle strip | triangle-strip adjacency | adjacency is currently a deliberate clear-only frame |
-| `6` | triangle fan | triangle fan | repeated presses partition the plane into fans of 1024, 512, 256, 64, 32, 16, then 8 vertices |
-| `7` | unbound | — | no function |
-| `8` | 256-quads gap grid | two gapped quad rings | repeated presses toggle the original 1,024-seed grid and a QUADLIST reinterpretation of Key 9's exact ring vertices |
-| `9` | quad strip | same | two independent thin 64-segment annuli; each first inner/outer pair repeats only to close its strip |
-| `0` | rectangle list | same | two rings of equal screen-space rectangles; three explicit corners, fourth implied |
+| Key | First press | Second press | Third press | Input contract |
+| --- | --- | --- | --- | --- |
+| `1` | point-list grid | four dotted circles | grid | circle mode reuses the 256 Key 9 ring vertices |
+| `2` | line-list grid | four dashed circles | line-list adjacency | circle mode pairs each vertex once, without joins between dashes |
+| `3` | line-strip grid | four closed circles | line-strip adjacency | four independent 65-index draws close the 64-vertex circles |
+| `4` | triangle list | triangle-list adjacency | triangle list | adjacency is currently a deliberate clear-only frame |
+| `5` | triangle strip | triangle-strip adjacency | triangle strip | adjacency is currently a deliberate clear-only frame |
+| `6` | triangle fan | triangle fan | triangle fan | repeated presses partition the plane into fans of 1024, 512, 256, 64, 32, 16, then 8 vertices |
+| `7` | unbound | — | — | no function |
+| `8` | 256-quads gap grid | two gapped quad rings | gap grid | toggles the original 1,024-seed grid and a QUADLIST reinterpretation of Key 9's exact ring vertices |
+| `9` | quad strip | rerolled quad strip | rerolled quad strip | two independent thin 64-segment annuli with fresh ±0.15% X/Y vertex jitter; each first inner/outer pair repeats only to close its strip |
+| `0` | rectangle list | same | same | two rings of equal screen-space rectangles; three explicit corners, fourth implied |
 
 The vertex and index execution buffers are written once during initialization.
-Press `0` through `9` to select topology; keys `2` through `5` toggle their
-ordinary and adjacency forms. Each frame changes only the draw descriptors.
+Press `0` through `9` to select topology; Keys `1` through `3` include the
+circle interpretations above, while Keys `4` and `5` toggle their ordinary and
+adjacency forms. Each frame changes only the draw descriptors.
 Point-list dots (`1`) are the startup default. Point-list Key `1` is deliberately
 split into two immediate-color draws: source ordinals divisible by three are
 green, while the other two ordinals are red. This makes the `green, red, red`

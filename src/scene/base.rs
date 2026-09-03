@@ -23,6 +23,22 @@ pub const QUAD_STRIP_DRAW_COUNT: usize = QUAD_STRIP_RING_COUNT;
 pub const QUAD_STRIP_INDICES_PER_DRAW: usize =
     (QUAD_STRIP_RING_SEGMENTS + 1) * QUAD_STRIP_RING_VERTICES_PER_PAIR;
 
+/// The two annuli expose four independent 64-vertex circular paths.
+pub const RING_CIRCLE_COUNT: usize =
+    QUAD_STRIP_RING_COUNT * QUAD_STRIP_RING_VERTICES_PER_PAIR;
+pub const RING_CIRCLE_VERTEX_COUNT: usize = QUAD_STRIP_RING_SEGMENTS;
+pub const POINT_RING_DRAW_COUNT: usize = RING_CIRCLE_COUNT;
+pub const POINT_RING_INDICES_PER_DRAW: usize = RING_CIRCLE_VERTEX_COUNT;
+pub const POINT_RING_INDEX_COUNT: usize = POINT_RING_DRAW_COUNT * POINT_RING_INDICES_PER_DRAW;
+pub const LINE_LIST_RING_DRAW_COUNT: usize = RING_CIRCLE_COUNT;
+pub const LINE_LIST_RING_INDICES_PER_DRAW: usize = RING_CIRCLE_VERTEX_COUNT;
+pub const LINE_LIST_RING_INDEX_COUNT: usize =
+    LINE_LIST_RING_DRAW_COUNT * LINE_LIST_RING_INDICES_PER_DRAW;
+pub const LINE_STRIP_RING_DRAW_COUNT: usize = RING_CIRCLE_COUNT;
+pub const LINE_STRIP_RING_INDICES_PER_DRAW: usize = RING_CIRCLE_VERTEX_COUNT + 1;
+pub const LINE_STRIP_RING_INDEX_COUNT: usize =
+    LINE_STRIP_RING_DRAW_COUNT * LINE_STRIP_RING_INDICES_PER_DRAW;
+
 /// Shared 32×32 seed plane for the regular point, line, and triangle modes.
 pub const LINE_GRID_COLUMNS: usize = 32;
 pub const LINE_GRID_ROWS: usize = 32;
@@ -170,6 +186,14 @@ pub(super) const fn quad_strip_ring_vertex(ring: usize, pair: usize, radial: usi
         + radial) as u32
 }
 
+pub(super) const fn ring_circle_vertex(circle: usize, step: usize) -> u32 {
+    quad_strip_ring_vertex(
+        circle / QUAD_STRIP_RING_VERTICES_PER_PAIR,
+        step % QUAD_STRIP_RING_SEGMENTS,
+        circle % QUAD_STRIP_RING_VERTICES_PER_PAIR,
+    )
+}
+
 pub(super) const fn line_grid_vertex(vertex: usize) -> u32 {
     (LINE_GRID_VERTEX_OFFSET + vertex) as u32
 }
@@ -253,8 +277,11 @@ pub(super) fn append_indices(
 ) -> bool {
     match mode {
         PrimitiveMode::PointList => append_point_list(indices, cursor),
+        PrimitiveMode::PointListRings => append_point_list_rings(indices, cursor),
         PrimitiveMode::LineList => append_line_list(indices, cursor),
+        PrimitiveMode::LineListRings => append_line_list_rings(indices, cursor),
         PrimitiveMode::LineStrip => append_line_strip(indices, cursor),
+        PrimitiveMode::LineStripRings => append_line_strip_rings(indices, cursor),
         PrimitiveMode::TriangleList => append_triangle_list(indices, cursor),
         PrimitiveMode::TriangleStrip => append_triangle_strip(indices, cursor),
         PrimitiveMode::TriangleFan => {
@@ -291,11 +318,31 @@ fn append_point_list(indices: &mut [u32], cursor: &mut usize) {
     }
 }
 
+fn append_point_list_rings(indices: &mut [u32], cursor: &mut usize) {
+    for circle in 0..RING_CIRCLE_COUNT {
+        for step in 0..RING_CIRCLE_VERTEX_COUNT {
+            indices[*cursor] = ring_circle_vertex(circle, step);
+            *cursor += 1;
+        }
+    }
+}
+
 fn append_line_list(indices: &mut [u32], cursor: &mut usize) {
     for grid_vertex in 0..LINE_GRID_VERTEX_COUNT {
         indices[*cursor + grid_vertex] = line_grid_vertex(grid_vertex);
     }
     *cursor += LINE_GRID_VERTEX_COUNT;
+}
+
+fn append_line_list_rings(indices: &mut [u32], cursor: &mut usize) {
+    // Sequential disjoint pairs produce 32 dashes per circle. No vertex is
+    // reused to bridge one dash to the next.
+    for circle in 0..RING_CIRCLE_COUNT {
+        for step in 0..RING_CIRCLE_VERTEX_COUNT {
+            indices[*cursor] = ring_circle_vertex(circle, step);
+            *cursor += 1;
+        }
+    }
 }
 
 fn append_line_strip(indices: &mut [u32], cursor: &mut usize) {
@@ -304,6 +351,17 @@ fn append_line_strip(indices: &mut [u32], cursor: &mut usize) {
         indices[*cursor + step] = line_grid_vertex(line_grid_snake_seed_vertex(step));
     }
     *cursor += LINE_GRID_VERTEX_COUNT;
+}
+
+fn append_line_strip_rings(indices: &mut [u32], cursor: &mut usize) {
+    // Each circle is a separate strip draw; repeat only its first point to
+    // close the final segment without connecting distinct radii.
+    for circle in 0..RING_CIRCLE_COUNT {
+        for step in 0..=RING_CIRCLE_VERTEX_COUNT {
+            indices[*cursor] = ring_circle_vertex(circle, step);
+            *cursor += 1;
+        }
+    }
 }
 
 fn append_triangle_list(indices: &mut [u32], cursor: &mut usize) {

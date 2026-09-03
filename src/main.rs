@@ -10,8 +10,9 @@ use potato_stamps::scene::{
     self, COLOR_TEXTURE_BYTES, COLOR_TEXTURE_NAME, DOCUMENT_BYTES, DOCUMENT_NAME,
     EXECUTION_INDEX_COUNT, EXECUTION_VERTEX_COUNT, ExecutionIndexCatalogue, LINE_GRID_NAME,
     LINE_GRID_VERTEX_COUNT, LINE_GRID_XYZ_BYTES, PrimitiveMode, STAMP_COUNT, Scene,
-    TRIANGLE_FAN_VERTEX_COUNTS, VERTEX_COUNT, decode_palette_rgba, line_grid_positions,
-    quad_strip_ring_positions, rect_list_positions,
+    QUAD_STRIP_RING_VERTEX_OFFSET, QUAD_STRIP_RING_VERTEX_COUNT, TRIANGLE_FAN_VERTEX_COUNTS,
+    VERTEX_COUNT, decode_palette_rgba, line_grid_positions, quad_strip_ring_positions,
+    rect_list_positions,
 };
 use trueos::ui4_scene::{Damage, Error as Ui4Error, Frame, ResizeEvent};
 use trueos::vgpu::{
@@ -38,6 +39,7 @@ const FRAME_OPACITY_SEVENTY_PERCENT: u8 = 179;
 const HID_USAGE_EQUALS_PLUS: u8 = 0x2e;
 const HID_USAGE_KEYPAD_PLUS: u8 = 0x57;
 const HID_MODIFIER_SHIFT_MASK: u8 = 0x22;
+const QUAD_STRIP_VERTEX_JITTER_NDC: f32 = 0.0015;
 
 // Keep the registered package directly `cargo check`-able as a thin no_std
 // Blueprint. TRUEOS's packer detects these declarations for the startup image.
@@ -311,6 +313,11 @@ impl PotatoStamps {
                         ),
                     );
                 } else {
+                    if next == PrimitiveMode::QuadStrip {
+                        self.refresh_quad_strip_vertices(true)?;
+                    } else if self.selected_mode == PrimitiveMode::QuadStrip {
+                        self.refresh_quad_strip_vertices(false)?;
+                    }
                     self.selected_mode = next;
                     logl::log(
                         level::INFO,
@@ -362,6 +369,17 @@ impl PotatoStamps {
         }
         Ok(())
     }
+
+    fn refresh_quad_strip_vertices(&self, jitter: bool) -> Result<(), DemoError> {
+        let bytes = quad_strip_ring_vertex_bytes(jitter);
+        write_exact_at(
+            self.device,
+            self.vertex_buffer,
+            QUAD_STRIP_RING_VERTEX_OFFSET * 12,
+            &bytes,
+        )
+        .map_err(|code| DemoError::Vgpu("quad-strip-vertex-upload", code))
+    }
 }
 
 fn seed_line_grid_xyz() -> Vec<u8> {
@@ -407,6 +425,21 @@ fn execution_vertex_bytes(scene: &Scene, line_grid_xyz: &[u8]) -> Vec<u8> {
     vertices
 }
 
+fn quad_strip_ring_vertex_bytes(jitter: bool) -> Vec<u8> {
+    let mut vertices = Vec::with_capacity(QUAD_STRIP_RING_VERTEX_COUNT * 12);
+    for mut position in quad_strip_ring_positions() {
+        if jitter {
+            position.x += (trueos::rng::f32() * 2.0 - 1.0) * QUAD_STRIP_VERTEX_JITTER_NDC;
+            position.y += (trueos::rng::f32() * 2.0 - 1.0) * QUAD_STRIP_VERTEX_JITTER_NDC;
+        }
+        vertices.extend_from_slice(&position.x.to_le_bytes());
+        vertices.extend_from_slice(&position.y.to_le_bytes());
+        vertices.extend_from_slice(&position.z.to_le_bytes());
+    }
+    debug_assert_eq!(vertices.len(), QUAD_STRIP_RING_VERTEX_COUNT * 12);
+    vertices
+}
+
 fn execution_index_bytes(catalogue: &ExecutionIndexCatalogue) -> Vec<u8> {
     let mut indices = Vec::with_capacity(EXECUTION_INDEX_COUNT * core::mem::size_of::<u32>());
     for index in catalogue.indices {
@@ -416,7 +449,16 @@ fn execution_index_bytes(catalogue: &ExecutionIndexCatalogue) -> Vec<u8> {
 }
 
 fn write_exact(device: Device, buffer: Buffer, bytes: &[u8]) -> Result<(), i32> {
-    let written = device.write_buffer(buffer, 0, bytes)?;
+    write_exact_at(device, buffer, 0, bytes)
+}
+
+fn write_exact_at(
+    device: Device,
+    buffer: Buffer,
+    offset: usize,
+    bytes: &[u8],
+) -> Result<(), i32> {
+    let written = device.write_buffer(buffer, offset, bytes)?;
     (written == bytes.len())
         .then_some(())
         .ok_or(trueos::vgpu::ERR_IO)
